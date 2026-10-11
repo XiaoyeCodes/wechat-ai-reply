@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="320" viewBox="0 0 1440 320" role="img" aria-labelledby="title desc">
+  <title id="title">Relay — WeChat AI Workspace</title>
+  <desc id="desc">A local workspace for conversations, agents and connected tools.</desc>
+  <rect width="1440" height="320" rx="24" fill="#f1f5ec"/>
+  <path d="M995 0H1416a24 24 0 0 1 24 24v272a24 24 0 0 1-24 24h-281z" fill="#e2ead8"/>
+  <circle cx="1230" cy="154" r="126" fill="none" stroke="#c3d3b6" stroke-width="1"/>
+  <circle cx="1230" cy="154" r="83" fill="none" stroke="#c3d3b6" stroke-width="1"/>
+  <rect x="72" y="72" width="88" height="88" rx="24" fill="#194f43"/>
+  <text x="89" y="136" fill="#fff" font-family="Georgia,serif" font-size="76" font-weight="bold">r</text>
+  <circle cx="136" cy="111" r="9" fill="#c9dfa1"/>
+  <text x="188" y="105" fill="#7d9071" font-family="Arial,sans-serif" font-size="15" letter-spacing="5">LOCAL FIRST · HUMAN IN CONTROL</text>
+  <text x="184" y="169" fill="#183e34" font-family="Arial,sans-serif" font-size="66" font-weight="700" letter-spacing="-3">Relay</text>
+  <text x="74" y="233" fill="#486149" font-family="Arial,sans-serif" font-size="28">WeChat AI Workspace</text>
+  <text x="75" y="271" fill="#87977b" font-family="Arial,sans-serif" font-size="16" letter-spacing="1">CHAT  /  AGENTS  /  MEMORY  /  SKILLS  /  MCP</text>
+  <rect x="1093" y="88" width="260" height="68" rx="20" fill="#fff"/>
+  <circle cx="1128" cy="122" r="12" fill="#d9e8c9"/>
+  <path d="M1156 117h139m-139 14h100" stroke="#b4c3a8" stroke-width="5" stroke-linecap="round"/>
+  <rect x="1151" y="172" width="214" height="64" rx="20" fill="#194f43"/>
+  <path d="M1180 196h145m-145 16h97" stroke="#adc799" stroke-width="5" stroke-linecap="round"/>
+</svg>

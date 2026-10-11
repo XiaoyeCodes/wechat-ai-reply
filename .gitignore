@@ -1,0 +1,35 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.panel-data/
+.panel-demo-data/
+node_modules/
+test-results/
+playwright-report/
+*.zip
+pywechat/.git/
+
+# Local credentials, chat databases, recordings and private implementation notes
+.env
+.env.*
+!.env.example
+*.sqlite3
+*.sqlite3-*
+*.db
+*.db-*
+*.log
+*.pem
+*.key
+*.egg-info/
+build/
+dist/
+/pywechat/
+/docs/plans/
+/docs/2026-*-verification.md
+
+# Ship the dependency source and its original license, not downloaded assets/tools
+/pywechat-main/*
+!/pywechat-main/src/
+!/pywechat-main/LICENSE
+!/pywechat-main/NOTICE.md

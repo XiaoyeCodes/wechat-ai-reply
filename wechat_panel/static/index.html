@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#184e3f">
+  <title>微信工作台 · Relay</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23184e3f'/%3E%3Cpath d='M11 12h18v13H19l-7 5V12' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/ai.css">
+  <script src="/assets/app.js" type="module"></script>
+<link rel="stylesheet" href="/assets/companion.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="rail" aria-label="主导航">
+      <a class="brand" href="/" aria-label="Relay 微信工作台">r<span>·</span></a>
+      <nav id="navigation">
+        <button class="nav-item active" data-view="chat" aria-label="聊天工作台"><span data-icon="chat"></span><span>工作台</span></button>
+        <button class="nav-item" data-view="contacts" aria-label="联系人管理"><span data-icon="users"></span><span>联系人</span></button>
+        <button class="nav-item" data-view="ai" aria-label="AI 中心"><span data-icon="spark"></span><span>AI 中心</span></button>
+        <button class="nav-item" data-view="agent" aria-label="Agent 接口"><span data-icon="panel"></span><span>接口</span></button>
+      </nav>
+      <div class="rail-bottom">
+        <button class="nav-item" data-view="status" aria-label="运行状态"><span data-icon="activity"></span><span>状态</span></button>
+        <div class="local-avatar" title="本机工作空间">本机</div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div class="workspace-title"><span class="eyebrow">RELAY / 微信工作空间</span><h1 id="page-title">聊天工作台</h1></div>
+        <div class="top-actions">
+          <span id="demo-label" class="pill amber" hidden>演示环境</span>
+          <button class="connection" id="connection-button" aria-label="查看微信连接状态"><span class="status-dot"></span><span id="connection-text">正在连接</span></button>
+          <button class="button secondary" id="pause-button"><span data-icon="pause"></span><span id="pause-text">全部暂停</span></button>
+          <button class="button primary" id="add-contact"><span data-icon="plus"></span><span>添加联系人</span></button>
+        </div>
+      </header>
+
+      <div id="runtime-banner" class="runtime-banner" hidden><span data-icon="info"></span><span id="runtime-detail"></span><button id="banner-status">查看状态</button></div>
+
+      <main class="chat-layout" id="view-chat">
+        <section class="conversations" aria-label="会话列表">
+          <div class="list-heading"><h2>会话<span id="contact-count" class="count">0</span></h2><span class="live-label"><i></i>实时同步</span></div>
+          <label class="search-field"><span data-icon="search"></span><input id="conversation-search" type="search" placeholder="搜索联系人或微信号" aria-label="搜索会话"></label>
+          <div class="filters" id="conversation-filters"><button class="active" data-filter="all">全部</button><button data-filter="unread">未处理<span id="unread-count"></span></button><button data-filter="listening">监听中</button></div>
+          <div id="conversation-list" class="conversation-list"></div>
+          <div class="list-footnote"><span data-icon="shield"></span>仅同步你添加的联系人</div>
+        </section>
+
+        <section class="chat-room" aria-label="聊天区域">
+          <div class="empty-workspace" id="chat-empty">
+            <div class="empty-art"><span data-icon="chat"></span><i></i><b></b></div>
+            <span class="eyebrow">从一段对话开始</span>
+            <h2>你的微信，专注的工作空间。</h2>
+            <p>添加并核验联系人，让消息在这里汇集。<br>你可以直接回复，也可以随时暂停监听。</p>
+            <button class="button primary" id="empty-add"><span data-icon="plus"></span>添加第一位联系人</button>
+            <div class="empty-capabilities"><span><span data-icon="check"></span>联系人身份核验</span><span><span data-icon="check"></span>聊天记录本地保存</span></div>
+          </div>
+          <div id="chat-content" class="chat-content" hidden>
+            <header class="chat-header"><div id="chat-avatar" class="avatar"></div><div class="chat-person"><h2 id="chat-name"></h2><p id="chat-subtitle"></p></div><span id="chat-mode" class="pill"></span><button id="show-details" class="icon-button" aria-label="查看联系人详情"><span data-icon="panel"></span></button></header>
+            <div class="history-note"><span data-icon="lock"></span>聊天记录保存在本机 · 首次连接同步窗口可见消息</div>
+            <div class="messages" id="messages" role="log" aria-label="聊天消息" aria-live="polite"></div>
+            <div class="composer-wrap">
+              <div id="ai-conversation" hidden></div>
+              <div class="composer-notice" id="composer-notice" hidden></div>
+              <form id="composer" class="composer"><label class="sr-only" for="message-input">消息内容</label><textarea id="message-input" rows="3" maxlength="1999" placeholder="写一条消息…"></textarea><div class="composer-bottom"><span class="composer-hint">Ctrl + Enter 发送<span id="character-count"></span></span><button class="button primary send-button" id="send-button" type="submit">发送<span data-icon="send"></span></button></div></form>
+              <p class="send-note">发送前重新核对微信号 · 结果不确定时留待核对</p>
+            </div>
+          </div>
+        </section>
+
+        <aside class="detail-panel" id="detail-panel" aria-label="联系人详情">
+          <div class="detail-heading"><h2>会话详情</h2><span data-icon="panel"></span></div>
+          <div id="detail-empty" class="detail-empty"><span data-icon="users"></span><p>选择一位联系人<br>查看资料和监听设置</p></div>
+          <div id="detail-content" hidden>
+            <div class="profile-card"><div id="profile-avatar" class="avatar large"></div><h3 id="profile-name"></h3><span class="verified"><span data-icon="shield"></span>身份已核验</span></div>
+            <dl class="profile-fields"><dt>微信号</dt><dd id="profile-wechat-id"></dd><dt>绑定账号</dt><dd id="profile-account"></dd><dt>核验时间</dt><dd id="profile-verified"></dd></dl>
+            <div class="detail-divider"></div>
+            <div class="setting-row"><div><h3>消息监听</h3><p id="listener-detail">尚未开启</p></div><button class="switch" id="listen-toggle" role="switch" aria-checked="false" aria-label="切换消息监听"><span></span></button></div>
+            <p class="inline-error" id="listener-error" hidden></p>
+            <label class="field-label" for="conversation-mode">会话模式</label><select id="conversation-mode"><option value="manual">人工聊天</option><option value="listen_only">仅监听</option><option value="ai_assist">AI 辅助回复</option><option value="ai_auto">AI 自动回复</option></select>
+            <p class="field-hint" id="ai-mode-hint">人工聊天可在工作台回复；仅监听保留消息，不发送回复。</p>
+            <div class="agent-placeholder"><span data-icon="spark"></span><h3>此联系人的 Agent</h3><label class="sr-only" for="contact-agent">选择联系人 Agent</label><select id="contact-agent"><option value="">尚未绑定 Agent</option></select><p id="contact-agent-hint">在 AI 中心配置电商、财务或你开发好的 Agent，再为每位联系人独立选择。</p><button class="text-button" id="ai-manage">管理 Agent<span data-icon="arrow"></span></button><button class="text-button" id="agent-details">事件接口说明</button></div>
+            <button class="button secondary full-width" id="retry-listener"><span data-icon="refresh"></span>重新建立监听</button>
+            <div class="demo-controls" id="demo-controls" hidden><label class="field-label" for="demo-message">模拟联系人发来消息</label><div class="demo-input"><input id="demo-message" placeholder="仅用于演示环境"><button class="icon-button" id="demo-inject" aria-label="注入演示消息"><span data-icon="send"></span></button></div></div>
+          </div>
+          <div class="detail-footer"><span class="status-dot"></span>本机数据存储</div>
+        </aside>
+      </main>
+
+      <main id="view-contacts" class="page-view" hidden><div class="page-intro"><div><span class="eyebrow">CONTACTS</span><h2>只连接需要的对话</h2><p>通过微信号核验身份，按联系人管理消息监听。</p></div><button id="sync-avatars" class="button secondary avatar-sync"><span data-icon="refresh"></span>同步头像</button></div><label class="search-field table-search"><span data-icon="search"></span><input type="search" id="contact-search" placeholder="搜索备注、昵称或微信号" aria-label="搜索联系人"></label><div class="table-wrap"><table><thead><tr><th>联系人</th><th>微信号</th><th>消息监听</th><th>会话模式</th><th>操作</th></tr></thead><tbody id="contacts-table"></tbody></table><div id="contacts-empty" class="table-empty" hidden>还没有添加联系人。点击右上角“添加联系人”开始。</div></div></main>
+
+      <main id="view-status" class="page-view" hidden><div class="page-intro"><div><span class="eyebrow">SYSTEM STATUS</span><h2>每一段连接，都有迹可循</h2><p>查看微信连接和消息同步状态。</p></div><button class="button secondary" id="reconnect"><span data-icon="refresh"></span>重启微信连接</button></div><div id="status-cards" class="status-cards"></div><div class="activity-section"><h3>最近的操作</h3><div id="activity-list"></div></div></main>
+
+      <main id="view-agent" class="page-view" hidden><div class="page-intro"><div><span class="eyebrow">AGENT CONNECTION</span><h2>从消息，到行动</h2><p>供你的外部服务读取已核验的入站消息；自动回复可在 AI 中心配置。</p></div><span class="pill">游标事件接口</span></div><div class="agent-doc"><div class="agent-symbol"><span data-icon="spark"></span></div><h3>让你的 Agent 接收经核验的入站消息</h3><p>通过游标读取新收到的文本消息。历史同步、本人发出的消息和方向待识别的消息，不会作为用户请求交给 Agent。</p><div class="endpoint"><span>GET</span><code>/api/agent/events?after=&lt;event_id&gt;</code></div><p>启用时在服务环境中配置 <code>WECHAT_PANEL_AGENT_TOKEN</code>，调用时使用 Bearer 身份验证。</p><pre>{
+  "event_id": 42,
+  "account_id": "当前微信账号",
+  "contact_id": "已核验的联系人 ID",
+  "wechat_id": "联系人微信号",
+  "message_id": 18,
+  "text": "用户发来的消息",
+  "received_at": "接收时间"
+}</pre><div class="agent-rule"><span data-icon="shield"></span><p>在 AI 中心配置工具执行策略：预设工具自动执行，其他工具在面板确认后执行。此只读事件接口不授予发送或执行任务的权限。</p></div></div></main>
+
+      <main id="view-ai" class="page-view ai-center" hidden>
+        <div class="ai-hero"><div><span class="eyebrow">RELAY INTELLIGENCE / 01</span><h2>为每一段对话，安排合适的 Agent。</h2><p>把模型、风格、知识与工具组合起来。你的电商助手、财务助手和自建 Agent，在同一个工作空间协作。</p></div><div class="ai-power"><span id="ai-power-label">AI 回复已关闭</span><button class="switch" id="ai-enabled" role="switch" aria-checked="false" aria-label="启用 AI 回复"><span></span></button><small>仅作用于已选择 AI 模式的联系人</small></div></div>
+        <div class="ai-summary" id="ai-summary"></div>
+        <div class="ai-settings-bar"><span>模型与 Agent 可复用，会话上下文按联系人隔离。</span><button class="text-button" id="ai-settings-open">回复设置</button></div>
+        <div class="ai-tabs" id="ai-tabs" role="tablist" aria-label="AI 配置分类"><button role="tab" data-ai-tab="agents" aria-selected="true">Agent</button><button role="tab" data-ai-tab="providers" aria-selected="false">模型连接</button><button role="tab" data-ai-tab="styles" aria-selected="false">回复风格</button><button role="tab" data-ai-tab="knowledge" aria-selected="false">知识库</button><button role="tab" data-ai-tab="skills" aria-selected="false">Skill 技能</button><button role="tab" data-ai-tab="tools" aria-selected="false">工具</button><button role="tab" data-ai-tab="mcp" aria-selected="false">MCP 连接</button><button role="tab" data-ai-tab="services" aria-selected="false">能力连接</button><button role="tab" data-ai-tab="memory" aria-selected="false">记忆与档案</button><button role="tab" data-ai-tab="schedules" aria-selected="false">主动关怀</button><button role="tab" data-ai-tab="runs" aria-selected="false">运行记录</button></div>
+        <section class="ai-library" aria-label="AI 资源"><div class="ai-section-heading"><div><h3 id="ai-section-title">我的 Agent</h3><p id="ai-section-description"></p></div><div class="companion-heading-actions"><button class="button secondary" id="ai-companion-template">创建阿慧模板</button><button class="button primary" id="ai-create">新建 Agent</button></div></div><div id="ai-library"></div></section>
+      </main>
+      <footer class="workspace-footer"><span>RELAY <b>·</b> 让对话有序发生</span><span id="footer-state">本机工作空间</span></footer>
+    </div>
+  </div>
+
+  <dialog id="contact-dialog"><form id="contact-form"><div class="modal-heading"><div><span class="eyebrow">NEW CONNECTION</span><h2>添加联系人</h2></div><button type="button" class="icon-button" data-close="contact-dialog" aria-label="关闭添加联系人"><span data-icon="close"></span></button></div><p class="modal-description">填写完整微信备注和微信号。工作台会读取微信中的个人资料，核验一致后添加。</p><label class="field-label" for="contact-lookup">完整微信备注</label><input id="contact-lookup" name="lookup" required maxlength="128" placeholder="例如：Quantum Rose" autocomplete="off"><label class="field-label" for="contact-wechat">联系人微信号</label><input id="contact-wechat" name="wechat_id" required maxlength="128" placeholder="填写个人资料中的微信号" autocomplete="off"><label class="checkbox-row"><input type="checkbox" id="contact-auto-listen" checked>添加后开始监听消息</label><div class="form-error" id="contact-error" role="alert" hidden></div><p id="contact-progress" class="field-hint" hidden>正在读取微信个人资料，请稍候…</p><div class="modal-actions"><button type="button" class="button secondary" data-close="contact-dialog">取消</button><button type="submit" id="contact-submit" class="button primary"><span data-icon="shield"></span>核验并添加</button></div></form></dialog>
+
+  <dialog id="delete-dialog"><form id="delete-form"><div class="modal-heading"><h2>移除联系人</h2><button type="button" class="icon-button" data-close="delete-dialog" aria-label="关闭移除联系人"><span data-icon="close"></span></button></div><p class="modal-description" id="delete-description"></p><p class="field-hint">将停止监听并删除该联系人在工作台的本地聊天记录。</p><div class="modal-actions"><button type="button" class="button secondary" data-close="delete-dialog">取消</button><button type="submit" class="button danger">移除联系人</button></div></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="ai-editor" class="ai-dialog"><form id="ai-editor-form"><div class="modal-heading"><div><span class="eyebrow">AI WORKSPACE</span><h2 id="ai-editor-title"></h2></div><button type="button" class="icon-button" id="ai-editor-close" aria-label="关闭 AI 编辑器">×</button></div><div id="ai-editor-fields"></div><p id="ai-editor-error" class="form-error" role="alert" hidden></p><div class="modal-actions"><button type="button" class="button secondary" id="ai-editor-cancel">取消</button><button class="button primary" type="submit" id="ai-save">保存配置</button></div></form></dialog>
+  <dialog id="ai-run-dialog" class="ai-dialog"><div class="modal-heading"><div><span class="eyebrow">AGENT RUN</span><h2>运行详情</h2></div><button type="button" class="icon-button" id="ai-run-close" aria-label="关闭运行详情">×</button></div><div id="ai-run-detail"></div></dialog>
+  <dialog id="ai-settings-dialog" class="ai-dialog"><form id="ai-settings-form"><div class="modal-heading"><h2>回复设置</h2><button type="button" class="icon-button" id="ai-settings-close" aria-label="关闭回复设置">×</button></div><label class="ai-field"><span>携带最近多少条消息</span><input id="ai-context" type="number" min="2" max="60" required></label><label class="ai-field"><span>连续消息合并等待（秒）</span><input id="ai-debounce" type="number" min="0.3" max="10" step="0.1" required></label><p class="field-hint">对方连续发来几条消息时，等待后合并处理。修改设置会取消尚未完成的旧回复。</p><div class="modal-actions"><button class="button primary">保存回复设置</button></div></form></dialog>
+  <dialog id="ai-test-dialog" class="ai-dialog"><form id="ai-test-form"><div class="modal-heading"><div><span class="eyebrow">PLAYGROUND</span><h2>测试 Agent</h2></div><button type="button" class="icon-button" id="ai-test-close" aria-label="关闭 Agent 测试">×</button></div><p class="field-hint">在测试台检查回复和工具流程，不会发送微信消息。需要确认的工具仍会等待批准。</p><label class="field-label" for="ai-test-agent">选择 Agent</label><select id="ai-test-agent" required></select><label class="field-label" for="ai-test-text">测试消息</label><textarea id="ai-test-text" rows="4" required maxlength="5000" placeholder="例如：这款商品可以退货吗？"></textarea><div class="companion-test-options"><label class="ai-check"><input id="ai-test-adult" type="checkbox">测试用户已自我声明成年</label><label class="button secondary">上传测试图片<input type="file" id="ai-test-image" accept="image/png,image/jpeg,image/webp" hidden></label><button type="button" class="text-button" id="ai-test-clear-image">移除图片</button><button type="button" class="text-button" id="ai-test-new-session">开启新会话</button><small id="ai-test-image-hint"></small></div><div class="modal-actions"><button class="button primary" id="ai-test-submit">开始测试</button></div></form><div id="ai-test-result"></div></dialog>
+</body>
+</html>
