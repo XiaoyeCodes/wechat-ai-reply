@@ -53,7 +53,8 @@ def test_per_contact_agents_full_http_reply_and_review_flow(tmp_path):
             post(f'/api/demo/{a}/incoming',{'text':'商品咨询 A-PRIVATE'})
             post(f'/api/demo/{a}/incoming',{'text':'退货怎么处理？'})
             draft=wait(lambda:run(a),lambda rs:rs and rs[0]['status']=='draft')[0]
-            assert draft['reply']=='电商回复：退货怎么处理？'
+            assert draft['reply'].startswith('电商回复：')
+            assert '商品咨询 A-PRIVATE' in draft['reply'] and '退货怎么处理？' in draft['reply']
             assert len(run(a))==1
             assert not [m for m in client.get(f'/api/contacts/{a}/messages').json() if m['direction']=='outgoing']
             post(f"/api/ai/runs/{draft['id']}/send",{'text':'人工修改的电商回复','client_key':'review-001'})

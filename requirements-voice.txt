@@ -1,0 +1,6 @@
+# Optional native voice replies on Windows; install after requirements-panel.txt.
+sounddevice>=0.5.6,<0.6
+numpy>=2.2,<3
+pycaw==20251023
+edge-tts>=7.3.1,<8
+soundfile>=0.13,<1

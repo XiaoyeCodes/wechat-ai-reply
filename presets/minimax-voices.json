@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "provider": "minimax",
+  "region": "cn",
+  "system_voices": [
+    {
+      "voice_id": "Chinese (Mandarin)_ExplorativeGirl",
+      "name": "漫游少女"
+    },
+    {
+      "voice_id": "Chinese (Mandarin)_Warm_HeartedGirl",
+      "name": "热心女孩"
+    },
+    {
+      "voice_id": "Chinese (Mandarin)_IntellectualGirl",
+      "name": "智性少女"
+    }
+  ],
+  "cloned_voices": [
+    {
+      "voice_id": "Relay85e169d626be4a179a4c437d9752d982",
+      "name": "阿慧 · 专属声音"
+    },
+    {
+      "voice_id": "Relay1e2c7bbd4e9d41ea9079d588000a66d0",
+      "name": "嘉然"
+    },
+    {
+      "voice_id": "Relay0af23f9f71754bf3b13d02a778eff1e7",
+      "name": "老八"
+    },
+    {
+      "voice_id": "Relay5be83772694e4a9a87f5cdb54034538c",
+      "name": "丁真"
+    },
+    {
+      "voice_id": "Relayfef5e9cf9a0a43fa8418913312ed1cba",
+      "name": "戏命师 · 烬"
+    }
+  ],
+  "online_presets": [
+    {
+      "id": "xiaoxiao",
+      "name": "晓晓 · 温柔陪伴",
+      "voice_id": "zh-CN-XiaoxiaoNeural"
+    },
+    {
+      "id": "xiaoyi",
+      "name": "晓伊 · 元气甜美",
+      "voice_id": "zh-CN-XiaoyiNeural"
+    }
+  ]
+}

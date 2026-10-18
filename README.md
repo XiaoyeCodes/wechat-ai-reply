@@ -83,16 +83,19 @@ Relay 是一个运行在 Windows 本机的微信管理面板。它通过桌面 U
 | **联系人管理** | 备注与微信号核验、头像缓存、搜索、独立监听开关 |
 | **消息监听** | 复用独立聊天窗；自动重连；窗口最小化后可托管到屏幕外继续读取 |
 | **AI 回复** | 人工、仅监听、AI 辅助、AI 自动回复四种会话模式 |
-| **多 Agent** | 每位联系人独立绑定 Agent；本地流程或外部 HTTP Agent |
+| **多 Agent** | 每位联系人独立绑定 Agent；本地流程、外部 HTTP Agent、Hermes 或 Vibe-Trading 原生引擎 |
+| **金融研究** | [Vibe-Trading](docs/vibe-trading.md) 支持 SparkFlow 同源引擎、完整原生技能工具、模型直连与长回复原文分段发送 |
+| **电脑任务** | Hermes 文件、终端、浏览器与桌面工具；普通聊天分流、读取免确认、敏感操作微信确认、执行轨迹与结果回传 |
 | **模型与风格** | Chat Completions 兼容接口、自定义模型、API Key、提示词及风格卡片 |
 | **知识库** | TXT / Markdown 导入；按需、每轮或关闭检索；当前使用 SQLite FTS5 |
 | **长期记忆** | 近期对话、滚动摘要、结构化事实；编辑、固定、过期及遗忘 |
 | **工具执行** | 内置工具、HTTP GET / POST、JSON Schema、自动执行或人工确认 |
 | **联网策略** | 明确查询及近期事实优先查证；记录实际来源；闲聊按需处理 |
+| **新闻汇总** | [原生 news-aggregator-skill](docs/deepseek-news.md)：多来源采集、关键词筛选、原文深读及早报预设，由 Aria 按类别汇总；一般联网保留 DeepSeek Search / Fetch |
 | **Skill** | 标准技能包导入、附件读取、按 Agent 绑定，通过已授权工具执行步骤 |
 | **MCP** | Streamable HTTP、真实工具发现与导入、独立连接配置、密钥加密 |
 | **主动关怀** | 一次性 / Cron 日程、时区、免打扰、次数限制与用户授权 |
-| **多模态** | 图片理解；可配置 TTS / 图片生成，结果在面板预览与下载 |
+| **多模态** | 图片理解、TTS；[Codex / ChatGPT 账号生图](docs/codex-images.md) 支持文生图与图生图，自动回复直接发回微信，测试台可预览与下载 |
 | **调试与观测** | 独立测试会话、运行轨迹、审批记录、外部观测连接 |
 
 ### 能力状态与边界
@@ -101,7 +104,8 @@ Relay 是一个运行在 Windows 本机的微信管理面板。它通过桌面 U
 - **需要模型配置**：AI 回复、记忆抽取、陪伴 Agent、图片理解；图片模型必须支持对应输入。
 - **需要外部服务**：联网搜索、向量记忆、TTS、生图、观测、高德 MCP。地址、凭证及配额由你提供。
 - **TreeMind**：配置入口与调用规则已准备，尚未核实公开官方 MCP 地址。需要服务商接口资料后继续配置；HTTP 预设默认停用。[详细说明](docs/mcp-connections.md)
-- **尚未实现**：微信原生语音气泡 / 生成媒体自动发送、任意 Skill 脚本执行、可视化条件分支流程、完整微信历史导出。
+- **Hermes 电脑助手**：可选独立安装，支持完整引擎与 Skill 脚本任务。可按联系人授权，普通聊天直接回复，支持“修改删除审批”“AI 代审”“完全访问”三档权限；微信回复“确认”即可批准整项任务。先在测试台体验，再授权联系人。[安装与使用](docs/hermes.md)
+- **尚未实现**：微信原生语音气泡 / 生成媒体自动发送、可视化条件分支流程、完整微信历史导出。
 
 ## 快速开始
 
@@ -177,11 +181,11 @@ python -m venv .\pywechat-main\.venv
 ### 从模型到自动回复
 
 ```text
-模型连接 → 回复风格 / 知识库 / 工具 → 创建 Agent → 测试台验证 → 联系人绑定
+模型连接 → 系统提示词 / 知识库 / 工具 → 创建 Agent → 测试台验证 → 联系人绑定
 ```
 
 1. **模型连接**：填写 Base URL、实际可用的模型 ID 和 Key，保存后测试。
-2. **回复风格**：设置职责、称呼、语气、长度及边界；可供多个 Agent 复用。
+2. **系统提示词**：在 Agent 中直接设置职责、称呼、语气及规则。独立回复风格功能已移除。
 3. **资料与能力**：导入知识库或 Skill，勾选允许使用的工具。
 4. **创建 Agent**：选择模型与风格，设置提示词、检索策略及处理步骤。
 5. **测试 Agent**：先验证连续对话、工具参数和异常响应，再绑定真实联系人。
@@ -210,7 +214,7 @@ python -m venv .\pywechat-main\.venv
 
 ### 系统提示词与自然表达
 
-在 **AI 中心 → Agent → 编辑** 设置系统提示词，搭配回复风格卡和「人设与表达」。在「记忆与档案」中可预览合成后的提示词，包含角色、当前用户上下文、联网规则及表达要求。
+在 **AI 中心 → Agent → 编辑** 设置系统提示词，作为该 Agent 的角色与表达规则。在「记忆与档案」中可预览合成后的提示词，包含角色、当前用户上下文、联网规则及表达要求。
 
 陪伴角色支持 **自然变化回复节奏** 和 **Emoji 使用倾向**：简单接话可以一句就停，复杂问题再展开，避免固定三段式和每轮追问。表情按情境偶尔使用；近期已经用过或情绪严肃时减少使用。它调整表达倾向，不保证每次模型输出都符合某个字数或概率。
 
@@ -248,6 +252,8 @@ weekly-planner/
 ```
 
 运行时按任务加载技能，通过 `read_skill_file` 读取参考文档，再调用已有工具。**导入技能不会自动安装依赖、执行 shell 脚本或增加工具权限。** 自编程序可封装为 HTTP 工具接入。
+
+内置新闻技能使用专门的 `news_collect` 工具执行已核验的上游原版脚本，支持 `source / keyword / limit / deep` 或 `profile` 参数。Aria 已接入原生多来源流程，不再限定澎湃。详见 [新闻技能与搜索](docs/deepseek-news.md)。
 
 现成示例：[网页与视频阅读 Skill](examples/skills/web-video-reader/SKILL.md)。
 
@@ -402,7 +408,7 @@ node scripts/capture-readme.cjs
 <details>
 <summary><strong>能执行 Skill 里的 Python、Shell 脚本吗？</strong></summary>
 
-当前可读取技能说明、参考资料和脚本源码，通过已授权工具完成步骤，不直接执行任意脚本。需要程序执行能力时，将程序包装为 HTTP 工具并配置参数、认证及审批。
+本地可配置流程读取技能说明和源码，通过已授权工具完成步骤。需要直接执行脚本时，可选择 **Hermes 电脑助手**，同步已导入的 Skill，由完整引擎通过终端执行；默认先在面板确认任务。[Hermes 使用说明](docs/hermes.md)
 
 </details>
 
@@ -426,6 +432,8 @@ node scripts/capture-readme.cjs
 - [陪伴、记忆、语音、图片及外部服务](docs/companion-services.md)
 - [高德 MCP 与 TreeMind 配置](docs/mcp-connections.md)
 - [外部 Agent 与入站事件接口](docs/agent-api.md)
+- [Hermes 电脑助手与 Skill 执行](docs/hermes.md)
+- [原生新闻技能与 DeepSeek 搜索](docs/deepseek-news.md)
 - [提交问题或建议](https://github.com/XiaoyeCodes/wechat-ai-reply/issues)
 
 反馈时请说明 Windows / 微信版本、操作步骤和运行错误，截图前遮挡私人聊天，勿上传 `.panel-data/`、API Key 或带凭证的 URL。
@@ -433,6 +441,8 @@ node scripts/capture-readme.cjs
 ## 致谢与第三方代码
 
 微信 UI 自动化基于 [Hello-Mr-Crab/pywechat](https://github.com/Hello-Mr-Crab/pywechat) 的 `pyweixin`，感谢上游作者与贡献者。项目也使用 FastAPI、pywinauto、SQLite、MCP Python SDK 和 Playwright 等开源组件。
+
+可选电脑执行引擎采用 [Nous Research Hermes Agent](https://github.com/NousResearch/hermes-agent)，遵循其 MIT 许可证；安装目录及同步的官方技能保留上游许可证。
 
 `pywechat-main/` 中保留上游的 [原始许可证](pywechat-main/LICENSE) 和 [来源说明](pywechat-main/NOTICE.md)。第三方代码遵循其各自许可；本仓库尚未为 Relay 自有代码单独声明开源许可证。
 

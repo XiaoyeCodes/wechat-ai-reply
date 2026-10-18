@@ -1,0 +1,24 @@
+{
+  "repository": "https://github.com/cclank/news-aggregator-skill",
+  "commit": "b639b622a79ec242669d6111708efbf863592de4",
+  "sha256": {
+    "SKILL.md": "96863a053cec63e07e3ae0aa73154fa69dc7d78a09dfbd93a87816a8bb69d232",
+    "README.md": "017e6eadf47ab6b22138132306ccaecd53a4943736b5af92c6c33d4a95a5cb49",
+    "requirements.txt": "2c081c1999175987aca18adf80b955273f88cc96b4b188ace8b1991aaa971ca7",
+    "templates.md": "3a1d68164c112fd8d80e7b1ed170433facb5f19358f6bfaff77756bc9851dcf2",
+    "user_sources.opml.example": "6ae0bdd357ba79796ffbe070d734d2b4a854e7474059d7a3a0dedc4c574e4cf5",
+    "scripts/fetch_news.py": "7be3590fa4bffef334ce2ca0d4fb97a9ce921fed503bf8ad29249416f95738b4",
+    "scripts/daily_briefing.py": "eb1fcac399aae4daadb010765f0526e1f2fb8d96b7a08a65d6268a03b091c659",
+    "scripts/rss_parser.py": "80f7a89cb686d7e63a3eac1c1fc7c1d05be716520c44b9f2fd43d9a4e13829b3",
+    "scripts/fetch_user_feeds.py": "e18e2f73dc3935a61f0254ce590b874338b0318292c48ee2bb3c9f9dffc63452",
+    "scripts/fetch_hf_papers_playwright.py": "3e137369c3ab9f26843a12fb4c5f0b25280b26105ae186ec3f9110b009e749ef",
+    "scripts/fetch_bensbites.py": "263662ff2f3be1cd21278a6605286a5002442077f9fe3c54aa4da70ddc91fc7a",
+    "scripts/fetch_generic_playwright.py": "718d3cf04335aa7654ff95ddfa5ef26876b2e6ee3337dafd6a9f1365090bfe7b",
+    "instructions/briefing_ai_daily.md": "f5b282dafc627b9532b2a9e5ae8ff7fb1b7ff6f0d2088674e04a526241473517",
+    "instructions/briefing_finance.md": "e399fad155f46b4617888889fdfe444bcb5025b13888355a545cc7c71f78f39c",
+    "instructions/briefing_general.md": "0a105ecb4a573bef9735ddb1ab434b40c580e3d648e51b12ffc9329f7dcedb60",
+    "instructions/briefing_github.md": "0eb26afb7687d2b403689fdaa72eb0149740d5cef5684a8353f6992a98abfc4a",
+    "instructions/briefing_social.md": "b338470298839e40819f7ae2bfae37a7ff956d910eb47ea292ceb39d79d1c798",
+    "instructions/briefing_tech.md": "2d8d118e6346b9490899ab0909faed4fa6eb7766980a1d973b8ce042cbeda5b8"
+  }
+}

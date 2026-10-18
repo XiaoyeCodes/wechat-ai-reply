@@ -3,6 +3,8 @@ import base64
 from datetime import datetime, timezone
 import ipaddress
 import json
+import re
+import time
 from pathlib import Path
 import shutil
 import socket
@@ -69,6 +71,18 @@ class Services:
 
     def search(self,sid,query,limit=5):
         s=self.get(sid,'search');query=query[:1000]
+        if s['driver']=='deepseek':
+            query=query.strip()[:128]
+            if not query:raise ValueError('搜索内容不能为空')
+            data=self.deepseek_call(s,'search',{'query':query,'count':min(max(limit,1),50),'need_content':False})
+            if not isinstance(data,dict) or not isinstance(data.get('results'),list):raise RuntimeError('DeepSeek 搜索返回格式无效')
+            results=[]
+            for item in data['results'][:limit]:
+                if not isinstance(item,dict):continue
+                results.append({k:str(item.get(k) or '')[:n] for k,n in
+                    [('title',300),('url',2000),('site_name',150),('date',80),('snippet',800),('summary',1800)]} |
+                    {k:item.get(k) for k in ('authority','rerank_score')})
+            return json.dumps({'engine':'deepseek','query':query,'results':results},ensure_ascii=False)
         if s['driver']=='agent_reach':
             cli=shutil.which('mcporter');node=shutil.which('node')
             script=Path(cli).parent/'node_modules/mcporter/dist/cli.js' if cli else None
@@ -96,6 +110,35 @@ class Services:
     def read_web(url):
         from .web_reader import read_page
         return json.dumps(read_page(url),ensure_ascii=False)
+
+    def deepseek_call(self,service,operation,body):
+        # Search / Fetch are read-only. Retry transient failures once, never
+        # credentials/balance errors, and never expose the response body/key.
+        for attempt in range(2):
+            try:return self.call(service,'/v1/tools/'+operation,body)
+            except RuntimeError as exc:
+                match=re.search(r'HTTP (\d+)',str(exc));code=int(match[1]) if match else None
+                if attempt==0 and code in (408,429,500,502,503,504):
+                    time.sleep(.8);continue
+                reason={401:'API Key 无效',402:'账户余额不足',403:'页面访问被限制',404:'未取得页面正文',
+                        408:'请求超时',429:'请求被限流'}.get(code,'接口暂不可用')
+                raise RuntimeError(f'DeepSeek {operation}：{reason}'+(f'（HTTP {code}）' if code else '')) from None
+
+    def fetch(self,sid,url):
+        # Keep transcript/platform readers for media links; Search/Fetch is
+        # the generic article reader, not a substitute for video subtitles.
+        from .platform_reader import platform_for_url
+        if platform_for_url(url):return self.read_web(url)
+        if not sid:return self.read_web(url)
+        service=self.get(sid,'search')
+        if service['driver']!='deepseek':return self.read_web(url)
+        public_url(url)
+        data=self.deepseek_call(service,'fetch',{'url':url})
+        if not isinstance(data,dict) or not isinstance(data.get('content'),str) or not data['content'].strip():
+            raise RuntimeError('DeepSeek Fetch 未取得页面正文，不能用搜索摘要代替原文')
+        content=data['content']
+        return json.dumps({'engine':'deepseek_fetch','url':url,'title':str(data.get('title') or '')[:300],
+                           'content':content[:18000],'truncated':len(content)>18000},ensure_ascii=False)
 
     @staticmethod
     def weather(city):
@@ -134,8 +177,12 @@ class Services:
         if mime not in ('audio/mpeg','audio/wav','audio/flac'):raise RuntimeError('语音接口没有返回受支持的音频格式')
         return data,mime
 
-    def generate_image(self,sid,prompt,media,reference=None):
+    def generate_image(self,sid,prompt,media,reference=None,cancelled=None):
         s=self.get(sid,'image');body={'model':s['model'],'prompt':prompt[:5000],'n':1}
+        if s['driver']=='codex_image':
+            if media.get('lora'):raise ValueError('Codex 生图不支持 LoRA，请清空 LoRA 设置')
+            from .codex_images import generate
+            return generate(prompt,reference,s['timeout'],cancelled)
         if s['driver']=='image_http':
             body.update(lora=media.get('lora',''),lora_scale=media.get('lora_scale',.8),reference_image=reference)
             value=self.call(s,'',body)

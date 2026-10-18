@@ -19,6 +19,8 @@ def wait_for(call, predicate, timeout=12):
 
 def test_end_to_end_api_with_real_worker_and_isolated_demo(tmp_path, monkeypatch):
     with TestClient(create_app(tmp_path, demo=True)) as client:
+        for path in ('/', '/assets/app.js', '/assets/ai.js', '/assets/vibe.js'):
+            assert client.get(path).headers['Cache-Control'] == 'no-store'
         wait_for(lambda:client.get('/api/status').json(), lambda x:x['state']=='ready')
         assert client.post('/api/contacts',json={'lookup':'测试','wechat_id':'x'}).status_code == 403
         assert client.post('/api/contacts',headers={**HEADERS,'Origin':'https://evil.example'},
@@ -68,3 +70,28 @@ def test_live_mode_does_not_expose_demo_injection(tmp_path):
     assert client.post('/api/demo/any/incoming',headers=HEADERS,json={'text':'x'}).status_code==404
     assert client.get('/',headers={'Host':'attacker.example'}).status_code==400
     assert client.get('/api/agent/schema').json()['enabled'] is False
+
+
+def test_hermes_binding_requires_explicit_contact_authorization(tmp_path):
+    # Demo worker; no real WeChat or Hermes calls.
+    with TestClient(create_app(tmp_path,demo=True)) as client:
+        store=client.app.state.store
+        aria=store.add_contact({'lookup':'Aria','nickname':'Aria','wechat_id':'aria','account_id':'self'})
+        other=store.add_contact({'lookup':'另一位','nickname':'另一位','wechat_id':'other','account_id':'self'})
+        body={'name':'Hermes 测试','kind':'hermes','url':'http://127.0.0.1:8123'}
+        response=client.post('/api/ai/config/agents',headers=HEADERS,json=body)
+        assert response.status_code==201
+        aid=response.json()['id']
+        def bind(cid):return client.patch('/api/contacts/'+cid,headers=HEADERS,json={'ai_agent_id':aid,'mode':'ai_auto'})
+        blocked=bind(aria['id'])
+        assert blocked.status_code==409 and '尚未授权' in blocked.json()['detail']
+        assert not store.contact(aria['id'])['ai_agent_id']
+        body['hermes_contact_id']=aria['id']
+        assert client.put('/api/ai/config/agents/'+aid,headers=HEADERS,json=body).status_code==200
+        assert bind(aria['id']).status_code==200
+        assert bind(other['id']).status_code==409
+        # Revoking engine access must not leave an apparently usable AI mode.
+        body['hermes_contact_id']=''
+        assert client.put('/api/ai/config/agents/'+aid,headers=HEADERS,json=body).status_code==200
+        assert client.patch('/api/contacts/'+aria['id'],headers=HEADERS,json={'listening':True}).status_code==409
+        assert client.patch('/api/contacts/'+aria['id'],headers=HEADERS,json={'mode':'manual','listening':False}).status_code==200

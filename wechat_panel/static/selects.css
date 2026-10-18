@@ -1,0 +1,39 @@
+/* Shared native select styling, including menus rendered in the top layer. */
+:root select {border-radius:12px}
+select:disabled {cursor:not-allowed;opacity:.6}
+
+@supports (appearance:base-select) {
+  select:not([multiple]):not([size]),
+  select:not([multiple]):not([size])::picker(select) {appearance:base-select}
+
+  select::picker(select) {
+    margin-block:6px;
+    padding:6px;
+    border:1px solid #dfe6de;
+    border-radius:14px;
+    background:#fff;
+    color:var(--ink);
+    box-shadow:0 12px 36px #203b2b24;
+    max-block-size:min(360px,60dvh);
+    overflow:auto;
+    overscroll-behavior:contain;
+    font:inherit;
+  }
+  select option {
+    min-block-size:38px;
+    padding:9px 12px;
+    border-radius:8px;
+    font:inherit;
+    line-height:1.6;
+    white-space:normal;
+    overflow-wrap:anywhere;
+    cursor:pointer;
+  }
+  select option:hover,select option:focus {background:#f0f5ec;color:var(--green)}
+  select option:checked {background:#e8f1e5;color:var(--green);font-weight:550}
+  select option:disabled {color:#96a18f;cursor:default}
+  select option[hidden] {display:none}
+  select option::checkmark {color:var(--green)}
+  select::picker-icon {color:#718373;transition:rotate .15s}
+  select:open::picker-icon {rotate:180deg}
+}

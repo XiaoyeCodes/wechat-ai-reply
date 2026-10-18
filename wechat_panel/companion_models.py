@@ -11,6 +11,7 @@ class Strict(BaseModel):
 
 
 class Persona(Strict):
+    # Retained only to read legacy configurations. No role/style injection uses it.
     enabled: bool=False
     name: str=Field(default='阿慧',max_length=40)
     age: int=Field(default=24,ge=18,le=100)
@@ -79,6 +80,7 @@ class Companion(Strict):
     media: MediaOptions=Field(default_factory=MediaOptions)
     safety: SafetyOptions=Field(default_factory=SafetyOptions)
     search_service_id: str=Field(default='',max_length=100)
+    news_verify: bool=False
     weather_enabled: bool=False
 
 

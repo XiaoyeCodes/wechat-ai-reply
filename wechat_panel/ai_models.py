@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from .companion_models import Companion
+from .vibe_catalog import DEFAULT_TOOLS, DEFAULT_SKILLS
 
 
 class Config(BaseModel):
@@ -29,11 +30,6 @@ class Provider(Config):
     max_tokens: int = Field(default=1000, ge=64, le=8000)
     timeout: int = Field(default=45, ge=5, le=120)
     _url = field_validator('base_url')(endpoint)
-
-
-class Style(Config):
-    description: str = Field(default='', max_length=300)
-    prompt: str = Field(min_length=1, max_length=16000)
 
 
 class Document(BaseModel):
@@ -88,9 +84,10 @@ class Tool(Config):
     connection_id: str = Field(default='', max_length=100)
     remote_name: str = Field(default='', max_length=200)
     capability: Literal['general','amap','mindmap'] = 'general'
-    builtin: Literal['clock', 'calculator', 'knowledge_search','web_search','read_web','weather',
+    builtin: Literal['clock', 'calculator', 'knowledge_search','web_search','read_web','news_collect','weather',
                      'music_search','places_search','movie_search','memory_search','remember','forget',
-                     'set_reminder','generate_image','speak','use_skill','read_skill_file'] | None = None
+                     'set_reminder','generate_image','speak','use_skill','read_skill_file',
+                     'platform_search','platform_read','platform_browse','platform_transcribe'] | None = None
     approval: Literal['auto', 'confirm'] = 'confirm'
     url: str = Field(default='', max_length=1000)
     method: Literal['GET', 'POST'] = 'POST'
@@ -146,16 +143,17 @@ class Step(BaseModel):
 
 class Agent(Config):
     description: str = Field(default='', max_length=300)
-    kind: Literal['workflow', 'external'] = 'workflow'
+    kind: Literal['workflow', 'external', 'hermes', 'vibe'] = 'workflow'
     enabled: bool = True
     provider_id: str = Field(default='', max_length=100)
     style_id: str = Field(default='', max_length=100)
+    temperature: float | None = Field(default=None, ge=0, le=2)
     knowledge_ids: list[str] = Field(default_factory=list, max_length=30)
     knowledge_mode: Literal['on_demand','always','off']='on_demand'
     web_policy: Literal['auto','model','off']='auto'
     source_policy: Literal['auto','requested','always']='auto'
     skill_ids: list[str]=Field(default_factory=list,max_length=20)
-    tool_ids: list[str] = Field(default_factory=list, max_length=30)
+    tool_ids: list[str] = Field(default_factory=list, max_length=64)
     prompt: str = Field(default='', max_length=16000)
     max_tool_rounds: int = Field(default=4, ge=1, le=10)
     steps: list[Step] = Field(default_factory=lambda:[Step(type='knowledge'),Step(type='model'),Step(type='reply')], min_length=1, max_length=12)
@@ -163,11 +161,58 @@ class Agent(Config):
     api_key: str | None = Field(default=None, max_length=4096)
     clear_secret: bool = False
     timeout: int = Field(default=60, ge=5, le=120)
+    hermes_managed: bool = False
+    hermes_workspace: str = Field(default='', max_length=1000)
+    hermes_contact_id: str = Field(default='', max_length=100)
+    hermes_task_approval: Literal['confirm', 'auto'] = 'confirm'
+    hermes_tool_policy: Literal['native', 'sensitive', 'all', 'ai_review', 'full'] = 'native'
+    hermes_approval_scope: Literal['task', 'operation'] = 'task'
+    hermes_approval_channel: Literal['panel', 'wechat'] = 'panel'
+    hermes_approval_timeout: int = Field(default=600, ge=60, le=1800)
+    hermes_chat_routing: bool = True
+    hermes_task_timeout: int = Field(default=900, ge=30, le=3600)
+    vibe_tools: list[str] = Field(default_factory=lambda: DEFAULT_TOOLS.copy(), max_length=30)
+    vibe_skills: list[str] = Field(default_factory=lambda: DEFAULT_SKILLS.copy(), max_length=30)
+    vibe_max_iterations: int = Field(default=12, ge=2, le=50)
+    vibe_engine: Literal['github', 'sparkflow'] = 'github'
+    vibe_task_timeout: int | None = Field(default=600, ge=30, le=1800)
     companion: Companion = Field(default_factory=Companion)
 
     @model_validator(mode='after')
     def valid(self):
-        if self.kind == 'external':
+        from .vibe_catalog import TOOLS, SKILLS
+        self.style_id = ''  # Accept legacy clients, but never retain a reply-style binding.
+        if self.kind == 'vibe' and self.vibe_engine == 'sparkflow':
+            # SessionService owns these settings; legacy forms must not override them.
+            self.vibe_max_iterations = 50
+            self.vibe_task_timeout = None
+            self.vibe_tools = []
+            self.vibe_skills = []
+            self.prompt = ''
+            self.style_id = ''
+        elif self.kind == 'vibe':
+            if self.vibe_max_iterations > 30 or self.vibe_task_timeout is None:
+                raise ValueError('GitHub 引擎最多 30 轮，且需要任务时限')
+        if set(self.vibe_tools) - TOOLS.keys() or set(self.vibe_skills) - SKILLS.keys():
+            raise ValueError('Vibe-Trading 包含未适配的工具或技能')
+        if self.kind == 'vibe':
+            if not self.provider_id:raise ValueError('Vibe-Trading 需要选择模型连接')
+            identity_tools={'get_stock_profile','get_stock_news','get_fundamentals','get_financial_statements',
+                            'get_market_data','get_options_chain','technical_indicators','etf_holdings'}
+            if identity_tools.intersection(self.vibe_tools) and 'search_symbol' not in self.vibe_tools:
+                raise ValueError('证券查询工具需要同时勾选“证券代码搜索”，用于核对标的身份')
+            if self.tool_ids or self.skill_ids or self.knowledge_ids:
+                raise ValueError('Vibe-Trading 请使用专属技能和工具选项')
+        elif self.kind == 'hermes':
+            if self.hermes_tool_policy!='native' and not self.hermes_managed:
+                raise ValueError('细粒度操作权限需要使用本机托管 Hermes 引擎')
+            if self.hermes_managed:
+                if not self.provider_id:raise ValueError('本机 Hermes 需要选择模型连接')
+            else:
+                self.url = endpoint(self.url)
+                if urlsplit(self.url).query:raise ValueError('Hermes 地址不能包含查询参数')
+            if self.hermes_tool_policy=='full':self.hermes_task_approval='auto'
+        elif self.kind == 'external':
             self.url = endpoint(self.url)
         else:
             if not self.provider_id:
@@ -190,8 +235,8 @@ class AISettings(BaseModel):
 
 class Service(Config):
     category: Literal['memory','search','tts','image','observability']
-    driver: Literal['qdrant','mem0','memory_http','agent_reach','exa','tavily','elevenlabs','minimax',
-                    'openai_speech','tts_http','openai_image','image_http','langfuse','langsmith','trace_http']
+    driver: Literal['qdrant','mem0','memory_http','agent_reach','exa','tavily','deepseek','elevenlabs','minimax',
+                    'openai_speech','tts_http','openai_image','image_http','codex_image','langfuse','langsmith','trace_http']
     url: str=Field(default='',max_length=1000)
     api_key: str | None=Field(default=None,max_length=4096)
     clear_secret: bool=False
@@ -201,15 +246,24 @@ class Service(Config):
     collection: str=Field(default='relay_memories',pattern=r'^[a-zA-Z0-9_-]{1,80}$')
     embedding_provider_id: str=Field(default='',max_length=100)
     enabled: bool=True
-    timeout: int=Field(default=45,ge=5,le=120)
+    timeout: int=Field(default=45,ge=5,le=900)
 
     @model_validator(mode='after')
     def validate_service(self):
-        drivers={'memory':{'qdrant','mem0','memory_http'},'search':{'agent_reach','exa','tavily'},
+        drivers={'memory':{'qdrant','mem0','memory_http'},'search':{'agent_reach','exa','tavily','deepseek'},
                  'tts':{'elevenlabs','minimax','openai_speech','tts_http'},
-                 'image':{'openai_image','image_http'},'observability':{'langfuse','langsmith','trace_http'}}
+                 'image':{'openai_image','image_http','codex_image'},'observability':{'langfuse','langsmith','trace_http'}}
         if self.driver not in drivers[self.category]:raise ValueError('服务类别与协议不匹配')
-        if self.driver!='agent_reach':self.url=endpoint(self.url)
+        if self.driver=='codex_image':
+            if self.api_key:raise ValueError('Codex 生图使用本机 ChatGPT 登录，无需填写 API Key')
+            self.url='';self.model='';self.clear_secret=True
+            if 'timeout' not in self.model_fields_set:self.timeout=300
+        elif self.timeout>120:raise ValueError('此服务的超时不能超过 120 秒')
+        if self.driver=='deepseek':
+            if self.url.rstrip('/') not in ('','https://api.deepseek.com','https://api.deepseek.com/v1','https://api.deepseek.com/v1/tools'):
+                raise ValueError('DeepSeek Search / Fetch 请使用官方地址 https://api.deepseek.com')
+            self.url='https://api.deepseek.com'
+        if self.driver not in ('agent_reach','codex_image'):self.url=endpoint(self.url)
         if self.driver=='qdrant' and not self.embedding_provider_id:raise ValueError('Qdrant 需要配置 Embedding 模型连接')
         return self
 
@@ -237,4 +291,4 @@ class MCPConnection(Config):
         return self
 
 
-CONFIGS = {'providers':Provider,'styles':Style,'knowledge':Knowledge,'tools':Tool,'agents':Agent,'services':Service,'skills':Skill,'mcp':MCPConnection}
+CONFIGS = {'providers':Provider,'knowledge':Knowledge,'tools':Tool,'agents':Agent,'services':Service,'skills':Skill,'mcp':MCPConnection}

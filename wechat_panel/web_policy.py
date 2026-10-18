@@ -5,7 +5,8 @@ import re
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-ONLINE={'web_search','read_web','weather','music_search','places_search','movie_search'}
+ONLINE={'web_search','read_web','news_collect','weather','music_search','places_search','movie_search',
+        'platform_search','platform_read','platform_browse','platform_transcribe'}
 NO_WEB=re.compile(r'(?:不要|不用|别|禁止|无需)(?:再|去)?(?:联网|上网|搜索|搜|查)|只(?:能)?(?:根据|用)(?:我|上述|上面|以下).{0,12}(?:资料|内容|文字)')
 EXPLICIT=re.compile(r'(?:联网|上网)(?:查|搜)?|(?:帮我|请|你可以|能不能|给我).{0,5}(?:搜|搜索|查一下|查查|查证|核实)|搜索|查一查')
 FACT=re.compile(r'是什么|什么(?:意思|东西|理论|梗)|哪些|谁是|是谁|怎么回事|真的吗|是否属实|多少|推荐|新闻|热搜|热榜|议论|讨论|发生|售价|价格|版本|政策|汇率')
@@ -16,6 +17,18 @@ CLAIM=re.compile(r'(?:我)?(?:搜|查)(?:了一圈|了一下|了下|到了|过�
 UNCERTAIN=re.compile(r'不(?:知道|清楚|确定|了解)|没(?:听过|法确认)|无法确认|拿不准')
 SOURCE_REQUEST=re.compile(r'(?:给|发|附|带|提供|标注|列出|保留|贴).{0,8}(?:来源|出处|链接|网址|原文)|(?:来源|出处|链接|网址)(?:呢|在哪|是什么|给我)|哪里(?:看到|查到)|source|citation',re.I)
 NO_SOURCES=re.compile(r'(?:不要|不用|别|无需).{0,4}(?:附|带|给|贴|提供)?(?:来源|出处|链接|网址|参考)')
+
+
+def conversation_only(text):
+    """Self/role/previous-action questions are answered from the conversation.
+
+    Every clause must be conversational: mixed requests can still fetch news.
+    """
+    if re.fullmatch(r'(?:(?:你好|您好|在吗|早安|晚安|谢谢[你啦]?|嗯+|哦+|好[的呀啊]?|知道了)[！!。？?，,～~\s]*)+',text.strip()):return True
+    clauses=[s.strip(' “”\"「」') for s in re.split(r'[，,。！？!?；;\n]',text) if s.strip()]
+    identity=re.compile(r'(?:你|您).{0,12}(?:是不是|是|算是).{0,8}(?:AI|人工智能|机器人|真人|人类|程序)|(?:你|您).{0,8}(?:是谁|叫什么|名字|身份|人设)|(?:你|您).{0,14}(?:搜|查|联网).{0,8}(?:什么|干什么|了吗|了没有|吗|呢)|(?:不用|不需要|别).{0,5}(?:搜|查|联网)',re.I)
+    followup=re.compile(r'^(?:这|那|刚才说的)?(?:是真的吗|真的假的|真的吗|是真的|为什么|怎么回事|我只是问你|我问的是你|回答我|说实话|嗯|哦)[呀啊呢吧嘛]*$')
+    return bool(clauses) and any(identity.search(c) for c in clauses) and all(identity.search(c) or followup.fullmatch(c) for c in clauses)
 
 
 def source_reason(run,state,reply):
@@ -33,7 +46,7 @@ def source_reason(run,state,reply):
     return ''
 
 
-def factual(text):return bool(FACT.search(text)) and not PERSONAL.search(text)
+def factual(text):return bool(FACT.search(text)) and not PERSONAL.search(text) and not conversation_only(text)
 
 
 def claimed_lookup(text):
@@ -44,7 +57,7 @@ def claimed_lookup(text):
 
 
 def allowed(state,run):
-    return state['snapshot']['agent'].get('web_policy','auto')!='off' and not NO_WEB.search(run['input'])
+    return state['snapshot']['agent'].get('web_policy','auto')!='off' and not NO_WEB.search(run['input']) and not conversation_only(run['input'])
 
 
 def query_for(run,state):
@@ -60,10 +73,16 @@ def query_for(run,state):
 
 def decide(run,state):
     text=run['input'];policy=state['snapshot']['agent'].get('web_policy','auto')
+    if conversation_only(text):return dict(required=False,reason='身份、角色或对话记录追问，直接依据当前设定和会话回答')
     if not allowed(state,run):return dict(required=False,reason='本轮关闭联网检索')
     from .mcp_policy import route
     selected=route(run,state)
     if selected:return dict(required=False,reason='优先使用已授权的专业工具；缺少输入先询问',capability=selected)
+    if any(t.get('builtin')=='platform_search' and t.get('enabled') for t in state['snapshot'].get('tools',{}).values()):
+        from .platform_catalog import PLATFORMS
+        platform_names=list(PLATFORMS.values())+['推特','小红书','领英','BOSS','bilibili','youtu.be','x.com','xiaohongshu.com','reddit.com','github.com','v2ex.com','xueqiu.com','xiaoyuzhoufm.com']
+        if any(name.lower() in text.lower() for name in platform_names if name not in ('网页','全网搜索')):
+            return dict(required=False,reason='用户指定平台，由模型选择已授权的平台搜索或读取工具')
     if policy=='model':return dict(required=False,reason='由模型自行选择工具')
     if TRANSFORM.search(text):return dict(required=False,reason='文字处理或询问操作记录，不主动查询')
     url=re.search(r'https?://[^\s<>"\u4e00-\u9fff，。！？）]+',text)
@@ -106,6 +125,10 @@ class WebPolicy:
     def __init__(self,ai):self.ai=ai
 
     def prepare(self,run,state):
+        from . import news_native
+        if news_native.requested(run,state):return news_native.prepare(self.ai,run,state)
+        from .news import requested, NewsResearch
+        if not news_native.bound(state) and requested(run,state):return NewsResearch(self.ai).prepare(run,state)
         if 'web_decision' not in state:
             state['web_decision']=decide(run,state)
             self.ai.data.trace(run['id'],'联网判断',state['web_decision'])
@@ -139,7 +162,7 @@ class WebPolicy:
         return ('\n# 本轮联网与证据规则\n'
                 '只有本轮实际工具结果能证明本轮查过，历史助手说过“查到了”不是证据。'
                 '未调用工具时禁止说“搜了一圈/搜了下/查到了/没搜到”。'
-                '陌生术语、拿不准的外部事实先查询，普通陪伴与个人记忆不需要联网。'
+                '陌生术语、拿不准的外部事实先查询，普通陪伴与个人记忆不需要联网。身份、角色及对刚才回复的追问直接回答，不能仅因“刚刚”“真的吗”搜索。'
                 '搜索失败与没有匹配结果是不同情况，限流时说明当前无法查询。'
                 '来源不匹配则说明尚未核实，不能补写细节。新闻必须核对日期。'
                 '已有本轮查询结果时先使用结果；只有确实缺少信息才补充搜索，不重复查询同一问题。'
@@ -149,9 +172,18 @@ class WebPolicy:
                 '只能引用实际工具返回的来源，不杜撰网址；按用户问题简短回答。')
 
     def check(self,run,state,reply):
+        if state.get('native_news'):
+            from .news_native import finish
+            return finish(self.ai,run,state,reply)
+        if state.get('news_ready'):
+            from .news import render
+            state['web_checked_reply']=render(run,state,reply)
+            self.ai.data.trace(run['id'],'新闻汇总完成',{'verified_items':len(state['news_packet']['items']),
+                'sources':[item['url'] for item in state['news_packet']['items']]})
+            return 'done'
         attempts=state.get('web_evidence',[])
         has_results=any(e['status']=='ok' for e in attempts)
-        claim=claimed_lookup(reply) and not TRANSFORM.search(run['input'])
+        claim=claimed_lookup(reply) and not TRANSFORM.search(run['input']) and not conversation_only(run['input'])
         uncertain=factual(run['input']) and bool(UNCERTAIN.search(reply))
         auto=state['snapshot']['agent'].get('web_policy','auto')=='auto'
         if not attempts and not state.get('web_repair') and auto and allowed(state,run) and (claim or uncertain):

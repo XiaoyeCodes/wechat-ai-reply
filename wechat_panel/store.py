@@ -7,7 +7,7 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from .snapshots import compare
+from .snapshots import compare, align
 from PIL import Image
 
 
@@ -45,11 +45,24 @@ class Store:
                     contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
                     data TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS snapshot_pending (
+                    contact_id TEXT PRIMARY KEY REFERENCES contacts(id) ON DELETE CASCADE,
+                    attempts INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS send_receipts (
+                    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                    baseline TEXT NOT NULL, before_count INTEGER NOT NULL DEFAULT 0,
+                    attempted_at TEXT
+                );
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL,
                     contact_id TEXT, payload TEXT NOT NULL, created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS voice_clones (
+                    request_id TEXT PRIMARY KEY, scope TEXT NOT NULL, voice_id TEXT NOT NULL,
+                    name TEXT NOT NULL, digest TEXT NOT NULL, status TEXT NOT NULL,
+                    error TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS avatars (
                     account_id TEXT NOT NULL, wechat_id TEXT NOT NULL,
                     digest TEXT NOT NULL, data BLOB NOT NULL, updated_at TEXT NOT NULL,
@@ -58,13 +71,21 @@ class Store:
                 INSERT OR IGNORE INTO settings VALUES ('paused', 'false');
             ''')
             for table, fields in {
-                'contacts':{'ai_agent_id':"TEXT NOT NULL DEFAULT ''",'ai_revision':'INTEGER NOT NULL DEFAULT 0','ai_start_message':'INTEGER NOT NULL DEFAULT 0'},
+                'contacts':{'ai_agent_id':"TEXT NOT NULL DEFAULT ''",'ai_revision':'INTEGER NOT NULL DEFAULT 0','ai_start_message':'INTEGER NOT NULL DEFAULT 0',
+                            'ai_context_start_message':'INTEGER NOT NULL DEFAULT 0','reply_format':"TEXT NOT NULL DEFAULT 'text'",
+                            'voice_preset':"TEXT NOT NULL DEFAULT 'windows-huihui'",
+                            'voice_model':"TEXT NOT NULL DEFAULT 'speech-2.8-turbo'"},
                 'messages':{'origin':"TEXT NOT NULL DEFAULT 'manual'",'ai_run_id':'TEXT',
-                            'direction_verified':'INTEGER NOT NULL DEFAULT 0','media_id':"TEXT NOT NULL DEFAULT ''"}
+                            'direction_verified':'INTEGER NOT NULL DEFAULT 0','media_id':"TEXT NOT NULL DEFAULT ''",'text_pending':'INTEGER NOT NULL DEFAULT 0'}
             }.items():
                 columns={r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
                 for name,definition in fields.items():
-                    if name not in columns:db.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
+                    if name not in columns:
+                        db.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
+                        if table=='contacts' and name=='ai_context_start_message':
+                            # Existing histories have no reliable binding boundary.
+                            # Start clean while retaining a short quoted handoff.
+                            db.execute('UPDATE contacts SET ai_context_start_message=COALESCE((SELECT MAX(id) FROM messages WHERE contact_id=contacts.id),0)')
 
     @contextmanager
     def connect(self):
@@ -155,10 +176,22 @@ class Store:
 
     def update_contact(self, contact_id, **values):
         self.contact(contact_id)
-        allowed = {'listening', 'mode', 'listener_state', 'error', 'unread', 'verified_at','ai_agent_id'}
+        allowed = {'listening', 'mode', 'listener_state', 'error', 'unread', 'verified_at','ai_agent_id','reply_format','voice_preset','voice_model'}
         if not values or not set(values) <= allowed:
             raise ValueError('无效的联系人字段')
+        if 'reply_format' in values and values['reply_format'] not in ('text','voice'):
+            raise ValueError('回复形式只支持文字或语音')
+        if 'voice_preset' in values:
+            from .voice_synthesis import preset
+            preset(values['voice_preset'],store=self)
+        if 'voice_model' in values:
+            from .minimax_voice import MODELS
+            if values['voice_model'] not in MODELS:raise ValueError('请选择 Turbo 或 HD 模型')
         with self.connect() as db:
+            previous=db.execute('SELECT ai_agent_id FROM contacts WHERE id=?',(contact_id,)).fetchone()[0]
+            if 'ai_agent_id' in values and values['ai_agent_id']!=previous:
+                db.execute('UPDATE contacts SET ai_context_start_message=COALESCE((SELECT MAX(id) FROM messages WHERE contact_id=?),0) WHERE id=?',
+                           (contact_id,contact_id))
             db.execute('UPDATE contacts SET ' + ','.join(f'{x}=?' for x in values) + ' WHERE id=?',
                        (*values.values(), contact_id))
             if set(values)&{'listening','mode','ai_agent_id'}:
@@ -198,7 +231,7 @@ class Store:
             row = db.execute('SELECT * FROM messages WHERE id=?', (message_id,)).fetchone()
             return dict(row) if row else None
 
-    def enqueue(self, contact_id, text, client_key, origin='manual', ai_run_id=None):
+    def enqueue(self, contact_id, text, client_key, origin='manual', ai_run_id=None, kind='text'):
         contact = self.contact(contact_id)
         if contact['mode'] == 'listen_only':
             raise ValueError('仅监听模式不能发送，请先切换到人工聊天')
@@ -210,13 +243,59 @@ class Store:
                     raise ValueError('相同请求标识不能用于不同消息')
                 return dict(prior), False
             cursor = db.execute('''INSERT INTO messages
-                (contact_id,direction,text,status,created_at,client_key,origin,ai_run_id) VALUES(?,?,?,?,?,?,?,?)''',
-                (contact_id, 'outgoing', text, 'queued', now(), client_key,origin,ai_run_id))
+                (contact_id,direction,text,status,created_at,client_key,origin,ai_run_id,kind) VALUES(?,?,?,?,?,?,?,?,?)''',
+                (contact_id, 'outgoing', text, 'queued', now(), client_key,origin,ai_run_id,kind))
             self.event(db, 'message.updated', contact_id, message_id=cursor.lastrowid)
             message_id = cursor.lastrowid
         return self.message(message_id), True
 
-    def set_message_state(self, message_id, status, error='', source_key=None):
+    def enqueue_ai_reply(self, contact_id, text, run_id):
+        """Enqueue all parts atomically, so early confirmation cannot end the run."""
+        from .wechat_text import split_text
+        if self.contact(contact_id)['mode'] == 'listen_only':
+            raise ValueError('仅监听模式不能发送')
+        ids = []
+        with self.connect() as db:
+            for index, part in enumerate(split_text(text)):
+                key = 'ai:' + run_id + (f':part:{index}' if index else '')
+                prior = db.execute('SELECT id,text FROM messages WHERE contact_id=? AND client_key=?',
+                                   (contact_id, key)).fetchone()
+                if prior:
+                    if prior['text'] != part:
+                        raise ValueError('相同请求标识不能用于不同消息')
+                    ids.append(prior['id'])
+                    continue
+                cursor = db.execute('''INSERT INTO messages
+                    (contact_id,direction,text,status,created_at,client_key,origin,ai_run_id)
+                    VALUES(?,?,?,?,?,?,?,?)''', (contact_id, 'outgoing', part, 'queued', now(), key, 'ai', run_id))
+                ids.append(cursor.lastrowid)
+                self.event(db, 'message.updated', contact_id, message_id=cursor.lastrowid)
+        return [self.message(mid) for mid in ids]
+
+    def enqueue_ai_images(self, contact_id, run_id, media_ids):
+        """Atomically queue every image; repeating finish never sends twice."""
+        if self.contact(contact_id)['mode'] == 'listen_only':
+            raise ValueError('仅监听模式不能发送')
+        ids = []
+        with self.connect() as db:
+            for index, mid in enumerate(dict.fromkeys(media_ids)):
+                key = f'ai:{run_id}:image:{index}'
+                prior = db.execute('SELECT * FROM messages WHERE contact_id=? AND client_key=?',
+                                   (contact_id, key)).fetchone()
+                if prior:
+                    if prior['media_id'] != mid or prior['kind'] != 'image':
+                        raise ValueError('相同请求标识不能用于不同图片')
+                    ids.append(prior['id'])
+                    continue
+                cursor = db.execute('''INSERT INTO messages
+                    (contact_id,direction,text,status,created_at,client_key,origin,ai_run_id,kind,media_id)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                    (contact_id, 'outgoing', '[图片]', 'queued', now(), key, 'ai', run_id, 'image', mid))
+                ids.append(cursor.lastrowid)
+                self.event(db, 'message.updated', contact_id, message_id=cursor.lastrowid)
+        return [self.message(mid) for mid in ids]
+
+    def set_message_state(self, message_id, status, error='', source_key=None, reconciled=False):
         with self.connect() as db:
             row = db.execute('SELECT * FROM messages WHERE id=?', (message_id,)).fetchone()
             if row:
@@ -224,22 +303,82 @@ class Store:
                     # A passive snapshot can observe the outgoing bubble before
                     # the worker's send confirmation arrives. Merge only that
                     # exact source identity, never all messages with equal text.
-                    echo = db.execute('''SELECT id FROM messages WHERE contact_id=? AND source_key=?
-                        AND id!=? AND status='observed' AND direction='outgoing' AND text=?''',
-                        (row['contact_id'], source_key, message_id, row['text'])).fetchone()
-                    if echo:
+                    from .wechat_text import receipt_text
+                    echo = db.execute('''SELECT id,text,kind FROM messages WHERE contact_id=? AND source_key=?
+                        AND id!=? AND status='observed' AND direction='outgoing' ''',
+                        (row['contact_id'], source_key, message_id)).fetchone()
+                    if echo and (receipt_text(echo['text']) == receipt_text(row['text']) or
+                                 (row['kind'] == echo['kind'] == 'file' and row['text'] in echo['text']) or
+                                 (row['kind'] == echo['kind'] and row['kind'] in ('voice','image'))):
                         db.execute('DELETE FROM messages WHERE id=?', (echo['id'],))
                         self.event(db, 'message.removed', row['contact_id'], message_id=echo['id'])
                 db.execute('UPDATE messages SET status=?,error=?,source_key=COALESCE(?,source_key) WHERE id=?',
                            (status, error, source_key, message_id))
                 self.event(db, 'message.updated', row['contact_id'], message_id=message_id)
-                if row['ai_run_id'] and status in ('confirmed','uncertain','failed','cancelled'):
+                if row['ai_run_id'] and row['origin']=='ai' and status in ('confirmed','uncertain','failed','cancelled'):
+                    run=db.execute('SELECT status FROM ai_runs WHERE id=?',(row['ai_run_id'],)).fetchone()
+                    if reconciled and run and run['status'] not in ('uncertain','queued','sent'):
+                        return  # Late evidence must not undo manual cancellation/takeover.
+                    remaining = db.execute("SELECT id,status FROM messages WHERE ai_run_id=? AND origin='ai' AND id!=?",
+                                           (row['ai_run_id'], message_id)).fetchall()
+                    if status == 'confirmed' and any(part['status'] != 'confirmed' for part in remaining):
+                        if any(part['status']=='queued' for part in remaining):
+                            db.execute("UPDATE ai_runs SET status='queued',error='',updated_at=? WHERE id=?",(now(),row['ai_run_id']))
+                            self.event(db,'ai.run',row['contact_id'],run_id=row['ai_run_id'])
+                        return
+                    receipt=db.execute('SELECT attempted_at FROM send_receipts WHERE message_id=?',(message_id,)).fetchone()
+                    recovering=status=='uncertain' and receipt and receipt['attempted_at']
+                    if status != 'confirmed' and not recovering:
+                        for part in remaining:
+                            if part['status'] == 'queued':
+                                db.execute("UPDATE messages SET status='cancelled',error=? WHERE id=?",
+                                           ('同一回复前段未确认送达，后续已停止', part['id']))
+                                self.event(db, 'message.updated', row['contact_id'], message_id=part['id'])
                     db.execute('UPDATE ai_runs SET status=?,error=?,updated_at=? WHERE id=?',
                                ('sent' if status=='confirmed' else status,error,now(),row['ai_run_id']))
                     self.event(db,'ai.run',row['contact_id'],run_id=row['ai_run_id'])
 
+    def send_receipt(self, message_id, stage, baseline=None, before_count=0):
+        """Write intent before the single click; a restart must never resend it."""
+        with self.connect() as db:
+            if stage=='prepared':
+                clean=[{k:v for k,v in i.items() if k not in ('image_data',)} for i in baseline or []]
+                db.execute('INSERT OR REPLACE INTO send_receipts VALUES(?,?,?,NULL)',
+                           (message_id,json.dumps(clean,ensure_ascii=False),before_count))
+            elif stage=='attempted':
+                db.execute('UPDATE send_receipts SET attempted_at=? WHERE message_id=?',(now(),message_id))
+
+    def awaiting_receipt(self, message):
+        if not message.get('ai_run_id'):return False
+        with self.connect() as db:
+            row=db.execute('''SELECT r.attempted_at FROM send_receipts r JOIN messages m ON m.id=r.message_id
+                WHERE m.ai_run_id=? AND m.status='uncertain' ORDER BY m.id LIMIT 1''',(message['ai_run_id'],)).fetchone()
+        return bool(row and row[0] and (datetime.now(timezone.utc)-datetime.fromisoformat(row[0])).total_seconds()<120)
+
+    def reconcile_receipts(self, contact_id, items):
+        from .send_receipts import match
+        with self.connect() as db:
+            rows=[dict(r) for r in db.execute('''SELECT m.*,r.baseline,r.before_count,r.attempted_at
+                FROM send_receipts r JOIN messages m ON m.id=r.message_id
+                WHERE m.contact_id=? AND m.status='uncertain' AND r.attempted_at IS NOT NULL
+                ORDER BY m.id DESC LIMIT 10''',(contact_id,))]
+        for row in rows:
+            if row['kind'] in ('voice','image'):continue  # Media needs its own in-flight receipt; never match a text placeholder.
+            if (datetime.now(timezone.utc)-datetime.fromisoformat(row['attempted_at'])).total_seconds()>120:continue
+            found=match(json.loads(row['baseline']),items,row['text'],row['before_count'])
+            if not found:continue
+            note=('消息已核对发送；'+row['error'][row['error'].find('原草稿'):]
+                  if '恢复备份' in row['error'] and '原草稿' in row['error'] else '')
+            self.set_message_state(row['id'],'confirmed',error=note,source_key=found['key'],reconciled=True)
+            with self.connect() as db:
+                self.event(db,'send.recovered',contact_id,message_id=row['id'],source_key=found['key'],detail='后台已核对新增本人消息，发送状态已自动恢复')
+
     def ai_send_valid(self, message):
-        if message.get('origin') != 'ai':return True
+        if message.get('origin')=='approval':
+            from .hermes_confirmations import valid_notice
+            return valid_notice(self,message)
+        if message.get('origin') not in ('ai','ai_progress'):return True
+        progress = message.get('origin') == 'ai_progress'
         with self.connect() as db:
             row=db.execute('''SELECT r.*,c.mode current_mode,c.ai_agent_id,c.ai_revision,c.listening FROM ai_runs r
                 JOIN contacts c ON c.id=r.contact_id WHERE r.id=?''',(message.get('ai_run_id'),)).fetchone()
@@ -248,11 +387,13 @@ class Store:
                 from .companion_scheduler import schedule_valid
                 return row['status']=='queued' and schedule_valid(self,dict(row))
             settings=json.loads(db.execute("SELECT value FROM settings WHERE key='ai_settings'").fetchone()[0])
-            latest=db.execute("SELECT MAX(id) FROM messages WHERE contact_id=? AND direction='incoming' AND historical=0 AND (kind='text' OR (kind='image' AND media_id!=''))",(row['contact_id'],)).fetchone()[0]
+            from .conversation_turn import latest_id
+            from .ai_store import AIStore
+            latest=latest_id(db,row['contact_id'],AIStore.decode_state(row['state'])['snapshot']['agent'])
             paused=db.execute("SELECT value FROM settings WHERE key='paused'").fetchone()[0]=='true'
-            return (not paused and settings['enabled'] and row['listening'] and row['status']=='queued'
+            return (not paused and settings['enabled'] and row['listening'] and row['status'] in (('running','queued') if progress else ('queued',))
                     and row['mode']==row['current_mode'] and row['agent_id']==row['ai_agent_id']
-                    and row['revision']==row['ai_revision'] and row['trigger_id']==latest)
+                    and row['revision']==row['ai_revision'] and (row['resume_message_id'] or row['trigger_id'])==latest)
 
     def recover(self):
         with self.connect() as db:
@@ -266,6 +407,22 @@ class Store:
             return [dict(x) for x in db.execute("SELECT * FROM messages WHERE status='queued' ORDER BY id")]
 
     def ingest(self, contact_id, items):
+        with self.connect() as db:
+            if not db.execute('SELECT 1 FROM contacts WHERE id=?',(contact_id,)).fetchone():return
+            prior=db.execute('SELECT data FROM snapshots WHERE contact_id=?',(contact_id,)).fetchone()
+            previous=json.loads(prior[0]) if prior else None
+            items=align(previous,items)
+            delta=compare(previous,items)
+            if delta.gap:
+                db.execute('INSERT INTO snapshot_pending VALUES(?,1) ON CONFLICT(contact_id) DO UPDATE SET attempts=attempts+1',(contact_id,))
+                attempts=db.execute('SELECT attempts FROM snapshot_pending WHERE contact_id=?',(contact_id,)).fetchone()[0]
+                if attempts<3:return  # Ignore transient empty/recycled frames; retain cursor.
+            else:
+                db.execute('DELETE FROM snapshot_pending WHERE contact_id=?',(contact_id,))
+                error=db.execute('SELECT error FROM contacts WHERE id=?',(contact_id,)).fetchone()
+                if error and error[0].startswith('窗口历史发生变化'):
+                    db.execute("UPDATE contacts SET error='' WHERE id=?",(contact_id,))
+                    self.event(db,'listener.recovered',contact_id,detail='已自动对齐消息并恢复监听；历史中断记录保留在日志中')
         media={}
         for item in items:
             if item.get('image_data'):
@@ -279,20 +436,22 @@ class Store:
         with self.connect() as db:
             if not db.execute('SELECT 1 FROM contacts WHERE id=?', (contact_id,)).fetchone():
                 return
-            prior = db.execute('SELECT data FROM snapshots WHERE contact_id=?', (contact_id,)).fetchone()
-            delta = compare(json.loads(prior[0]) if prior else None, items)
+            # previous/delta were checked before media handling; the serial pump
+            # is the only snapshot writer.
             for item in delta.items:
                 cursor = db.execute('''INSERT OR IGNORE INTO messages
-                    (contact_id,direction,text,kind,status,created_at,source_key,historical,direction_verified,media_id)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)''', (contact_id, item['direction'], item['text'],
-                    item.get('kind','text'), 'observed', now(), item['key'], delta.historical,bool(item.get('direction_verified')),media.get(item['key'],'')))
+                    (contact_id,direction,text,kind,status,created_at,source_key,historical,direction_verified,media_id,text_pending,error)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', (contact_id, item['direction'], item['text'],
+                    item.get('kind','text'), 'observed', now(), item['key'], delta.historical,bool(item.get('direction_verified')),media.get(item['key'],''),bool(item.get('text_pending')),item.get('text_error','')))
                 if cursor.rowcount:
                     self.event(db, 'message.updated', contact_id, message_id=cursor.lastrowid)
                     if not delta.historical and item['direction'] == 'incoming':
                         db.execute('UPDATE contacts SET unread=unread+1 WHERE id=?', (contact_id,))
-                        if item.get('kind') == 'text' or (item.get('kind')=='image' and media.get(item['key'])):
+                        if (item.get('kind') == 'text' and not item.get('text_pending')) or (item.get('kind')=='image' and media.get(item['key'])):
                             self.event(db, 'agent.message', contact_id, message_id=cursor.lastrowid,
                                        text=item['text'], account_id=item.get('account_id'))
+                        elif item.get('kind')=='image':
+                            self.event(db,'agent.attachment',contact_id,message_id=cursor.lastrowid)
             # A new row can be clipped/undrawn on its first observation. Resolve
             # its sender later without inserting a second copy or replaying history.
             # Older captures made with system-DPI coordinates can be corrected
@@ -303,6 +462,14 @@ class Store:
                 row=db.execute('SELECT * FROM messages WHERE contact_id=? AND source_key=?',
                                (contact_id,item['key'])).fetchone()
                 if not row:continue
+                if not (row['origin']=='ai' and row['kind']=='voice') and 'text_pending' in item and (row['text']!=item['text'] or bool(row['text_pending'])!=bool(item['text_pending']) or row['error']!=item.get('text_error','')):
+                    # Enrich the original UI row instead of inserting/replaying it.
+                    db.execute('UPDATE messages SET text=?,text_pending=?,error=? WHERE id=?',
+                               (item['text'],bool(item['text_pending']),item.get('text_error',''),row['id']))
+                    self.event(db,'message.updated',contact_id,message_id=row['id'])
+                    if (not item['text_pending'] and direction=='incoming' and not row['historical']
+                            and not db.execute("SELECT 1 FROM events WHERE contact_id=? AND type='agent.message' AND json_extract(payload,'$.message_id')=?",(contact_id,row['id'])).fetchone()):
+                        self.event(db,'agent.message',contact_id,message_id=row['id'],text=item['text'],account_id=item.get('account_id'))
                 if item['key'] in media and not row['media_id']:
                     db.execute("UPDATE messages SET media_id=?,error='' WHERE id=?",(media[item['key']],row['id']))
                     self.event(db,'message.updated',contact_id,message_id=row['id'])
@@ -318,16 +485,16 @@ class Store:
                     if not row['historical']:
                         if direction=='incoming':
                             db.execute('UPDATE contacts SET unread=unread+1 WHERE id=?',(contact_id,))
-                            if (row['kind']=='text' or (row['kind']=='image' and (row['media_id'] or media.get(item['key'])))) and not db.execute("SELECT 1 FROM events WHERE contact_id=? AND type='agent.message' AND json_extract(payload,'$.message_id')=?",
+                            if ((row['kind']=='text' and not item.get('text_pending',row['text_pending'])) or (row['kind']=='image' and (row['media_id'] or media.get(item['key'])))) and not db.execute("SELECT 1 FROM events WHERE contact_id=? AND type='agent.message' AND json_extract(payload,'$.message_id')=?",
                                                                    (contact_id,row['id'])).fetchone():
-                                self.event(db,'agent.message',contact_id,message_id=row['id'],text=row['text'],account_id=item.get('account_id'))
+                                self.event(db,'agent.message',contact_id,message_id=row['id'],text=item['text'],account_id=item.get('account_id'))
                         elif row['direction']=='incoming':
                             db.execute('UPDATE contacts SET unread=MAX(0,unread-1) WHERE id=?',(contact_id,))
                 elif verified and not row['direction_verified'] and row['direction']==direction:
                     db.execute('UPDATE messages SET direction_verified=1 WHERE id=?',(row['id'],))
             # A temporarily empty/unreadable window must not erase our cursor and
             # turn old messages into new Agent events when it reappears.
-            if items or not prior:
+            if (items or not prior) and not delta.retain:
                 db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',
                            (contact_id, json.dumps([{k:v for k,v in item.items() if k!='image_data'} for item in items], ensure_ascii=False)))
             if delta.gap:
@@ -336,6 +503,7 @@ class Store:
                 if error != detail:
                     db.execute('UPDATE contacts SET error=? WHERE id=?', (detail, contact_id))
                     self.event(db, 'listener.gap', contact_id, detail=detail)
+        self.reconcile_receipts(contact_id,items)
 
     def events(self, after=0, limit=100, agent_only=False):
         with self.connect() as db:

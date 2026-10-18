@@ -1,0 +1,3 @@
+# Runtime verifies the native news skill against upstream file hashes.
+# Preserve its original bytes on every platform, including Windows.
+skills/news-aggregator-skill/** -text

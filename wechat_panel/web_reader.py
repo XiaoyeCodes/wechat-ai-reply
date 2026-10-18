@@ -74,10 +74,15 @@ def bilibili(url):
     return result
 
 
-def read_page(url):
+def read_page(url, platform_routing=True):
     from .companion_services import public_url
     public_url(url)
     host=(urlsplit(url).hostname or '').lower()
+    if platform_routing:
+        from .platform_reader import platform_for_url, execute
+        platform=platform_for_url(url)
+        if platform and platform!='bilibili':
+            return json.loads(execute('platform_read',{'platform':platform,'target':url}))
     if host=='b23.tv':
         try:
             with httpx.Client(timeout=15,follow_redirects=False) as client:r=client.get(url)

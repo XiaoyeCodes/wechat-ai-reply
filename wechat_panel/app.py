@@ -45,6 +45,9 @@ class ContactPatch(StrictModel):
     listening: bool | None = None
     mode: Literal['manual', 'listen_only','ai_assist','ai_auto'] | None = None
     ai_agent_id: str | None = Field(default=None,max_length=100)
+    reply_format: Literal['text','voice'] | None = None
+    voice_preset: str | None = Field(default=None,max_length=300)
+    voice_model: Literal['speech-2.8-turbo','speech-2.8-hd'] | None = None
 
 
 class MessageCreate(StrictModel):
@@ -67,6 +70,11 @@ class Pause(StrictModel):
 
 class DemoMessage(StrictModel):
     text: str = Field(min_length=1, max_length=1999)
+
+
+class DraftReply(StrictModel):
+    text: str = Field(min_length=1, max_length=16000)
+    client_key: str = Field(min_length=8, max_length=128)
 
 
 def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime, ai_model_call=None):
@@ -101,8 +109,8 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
         response = await call_next(request)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'same-origin'
-        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
-        if request.url.path.startswith('/api'):
+        response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+        if request.url.path.startswith(('/api', '/assets')) or request.url.path == '/':
             response.headers['Cache-Control'] = 'no-store'
         return response
 
@@ -160,7 +168,11 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
         current=app.state.store.contact(contact_id)
         agent_id=changes.get('ai_agent_id',current['ai_agent_id'])
         mode=changes.get('mode',current['mode'])
-        if agent_id:app.state.ai.data.get('agents',agent_id)
+        if agent_id:
+            agent=app.state.ai.data.get('agents',agent_id)
+            if (agent['kind']=='hermes' and agent.get('hermes_contact_id')!=contact_id
+                    and ('ai_agent_id' in changes or (mode in ('ai_assist','ai_auto') and changes.get('listening',current['listening'])))):
+                raise HTTPException(409,'Hermes 尚未授权此联系人。请在 AI 中心编辑该 Agent，设置“允许下达电脑任务的微信联系人”，保存后再绑定。')
         if mode in ('ai_assist','ai_auto') and not agent_id:
             raise HTTPException(409,'请先为此联系人选择 Agent')
         if mode in ('ai_assist','ai_auto') and changes.get('listening',current['listening']):
@@ -265,7 +277,7 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
     def ai_bootstrap():
         data=app.state.ai.data
         return dict(settings=data.settings(),health=app.state.ai.health(),
-                    **{kind:data.list(kind) for kind in ('providers','styles','knowledge','tools','agents','services','skills','mcp')})
+                    **{kind:data.list(kind) for kind in ('providers','knowledge','tools','agents','services','skills','mcp')})
 
     @app.post('/api/ai/mcp/{resource_id}/discover')
     async def mcp_discover(resource_id: str):
@@ -322,6 +334,19 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
         answer,usage=await asyncio.to_thread(app.state.ai.model_call,provider,[{'role':'user','content':'请只回复：连接成功'}],[])
         return dict(reply=answer.get('content',''),usage=usage)
 
+    @app.post('/api/ai/agents/{resource_id}/hermes-test')
+    async def hermes_test(resource_id: str):
+        return await asyncio.to_thread(app.state.ai.hermes.connection_test,resource_id)
+
+    @app.get('/api/ai/vibe/catalog')
+    def vibe_catalog():
+        from .vibe import catalog
+        return catalog()
+
+    @app.post('/api/ai/agents/{resource_id}/vibe-test')
+    async def vibe_test(resource_id: str):
+        return await asyncio.to_thread(app.state.ai.vibe.connection_test,resource_id)
+
     @app.post('/api/ai/providers/{resource_id}/models')
     async def ai_models(resource_id: str):
         provider=app.state.ai.data.get('providers',resource_id,private=True)
@@ -350,13 +375,22 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
     @app.get('/api/ai/runs/{run_id}')
     def ai_run(run_id: str):return app.state.ai.data.detail(run_id)
 
+    @app.get('/api/ai/runs/{run_id}/pdf')
+    def ai_run_pdf(run_id: str):
+        from .financial_pdf import report_path
+        run = app.state.ai.data.run(run_id)
+        path = report_path(app.state.store.path.parent, run_id)
+        if not run['state'].get('pdf') or not path.is_file():
+            raise HTTPException(404, 'PDF 尚未生成')
+        return FileResponse(path, media_type='application/pdf', filename=path.name)
+
     @app.post('/api/ai/approvals/{approval_id}')
     def ai_approve(approval_id: str,body: dict):
         if type(body.get('approved')) is not bool:raise ValueError('请选择批准或拒绝')
         return app.state.ai.approve(approval_id,body['approved'])
 
     @app.post('/api/ai/runs/{run_id}/send',status_code=202)
-    def ai_send(run_id: str,body: MessageCreate):
+    def ai_send(run_id: str,body: DraftReply):
         return app.state.ai.send_draft(run_id,body.text)
 
     @app.post('/api/ai/runs/{run_id}/cancel')
@@ -399,6 +433,8 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
 
     from .companion_api import install_companion_routes
     install_companion_routes(app)
+    from .voice_api import install_voice_routes
+    install_voice_routes(app)
 
     app.mount('/assets', StaticFiles(directory=STATIC, check_dir=False), name='assets')
     return app

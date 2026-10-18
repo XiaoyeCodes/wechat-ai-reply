@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import uuid
+from pathlib import Path
 
 from fastapi import HTTPException
 from fastapi.responses import Response
@@ -101,9 +102,10 @@ def install_companion_routes(app):
             if not search:search=ai.data.save('services',None,{'name':'Agent Reach · Exa','category':'search','driver':'agent_reach'})
             allowed={'clock','weather','web_search','read_web','music_search','places_search','movie_search','memory_search','remember','forget','set_reminder'}
             tools=[t['id'] for t in ai.data.list('tools') if t.get('builtin') in allowed]
-            agent=ai.data.save('agents',None,dict(name='阿慧 · 甜心陪伴',description='温柔、有一点小傲娇的设计师。记得你的喜好，也尊重你的生活。',
-                provider_id=provider,tool_ids=tools,prompt='按照分层人设自然聊天，简短具体，避免客服腔。不主动宣称真人身份；认真问到时说明是 AI。',
-                companion={'persona':{'enabled':True},'memory':{'enabled':True},'care':{'enabled':False},'search_service_id':search['id']}))
+            agent=ai.data.save('agents',None,dict(name='阿慧 · 甜心陪伴',description='22 岁，温柔甜美、活泼俏皮，先接住情绪，再自然陪伴。',
+                provider_id=provider,tool_ids=tools,temperature=.95,
+                prompt=(Path(__file__).resolve().parent.parent/'docs/prompts/ahui-system.md').read_text('utf-8').strip(),
+                companion={'memory':{'enabled':True},'care':{'enabled':False},'search_service_id':search['id']}))
         return agent
 
     @app.post('/api/ai/companion/prompt')
@@ -112,5 +114,8 @@ def install_companion_routes(app):
         state={'snapshot':ai.snapshot(agent['id']),'context':[],'knowledge':[],'last':'','dynamic_context':{'user_profile':profile['data'],'conversation_summary':profile['summary'],
             'recent_mood':profile['mood'],'time':'每轮按联系人时区注入','memories':'每轮按用户来信检索','weather':'配置城市并启用后获取'}}
         run={'id':'prompt-preview','input':'你好','contact_id':body.get('contact_id')}
+        state['prompt_variables']=ai.companion.prompt_context.variables(run,companion_config(agent),profile['data'])
+        state['dynamic_context']['time']=state['prompt_variables']['current_time']
+        state['dynamic_context']['weather']=state['prompt_variables']['weather']
         instruction=next((s['instruction'] for s in agent['steps'] if s['type']=='model'),'')
         return {'prompt':ai._base_messages(run,state,instruction)[0]['content']}

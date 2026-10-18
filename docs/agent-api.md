@@ -1,5 +1,7 @@
 # 外部 Agent 与事件接口
 
+接入完整 Hermes 引擎请使用独立的 **Hermes 电脑助手** 类型，参见 [安装与配置](hermes.md)。它通过官方 Runs API 管理长任务、工具审批和取消，与下方的一次性 HTTP 回复协议不同。
+
 ### 接入你开发好的 Agent
 
 在 Agent 来源中选择 **我开发的外部 Agent（HTTP）**，填写地址和可选 API Key，然后为对应联系人选择它。例如 客户甲选择电商 Agent，客户乙选择财务 Agent。外部 Agent 无需再绑定本地模型。

@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .panel-data/
 .panel-demo-data/
+.runtime/
 node_modules/
 test-results/
 playwright-report/
@@ -27,6 +28,10 @@ dist/
 /pywechat/
 /docs/plans/
 /docs/2026-*-verification.md
+
+# Local diagnostic exports can contain chat content, credentials and recordings.
+/output/
+/tmp/
 
 # Ship the dependency source and its original license, not downloaded assets/tools
 /pywechat-main/*

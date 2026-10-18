@@ -1,8 +1,134 @@
-"""Copy one verified image bubble, never reuse stale clipboard content."""
+"""Receive verified image bubbles and send PNGs without stale copies or resends."""
 from io import BytesIO
+from pathlib import Path
+import tempfile
 import time
 
 from PIL import Image, ImageGrab, ImageStat
+
+from .snapshots import align, compare
+
+
+def match_image(baseline, current):
+    current = align(baseline, current)
+    delta = compare(baseline, current)
+    if delta.historical or delta.gap:
+        return None
+    matches = [x for x in delta.items if x.get('direction') == 'outgoing'
+               and x.get('direction_verified', True) and x.get('kind') == 'image']
+    return matches[0] if len(matches) == 1 else None
+
+
+def send_image(bridge, contact, data, before_send=None):
+    import pyautogui
+    import win32gui
+    from PIL import Image
+    from pyweixin import SystemSettings
+    from .bridge import BridgeError, SendUncertain
+    from .wechat_draft import ChatDraft, clipboard_read, clipboard_write
+    from .voice_reply import ReplySuperseded
+
+    if len(data) > 8_000_000:
+        raise BridgeError('待发送图片超过 8 MB')
+    with Image.open(BytesIO(data)) as img:
+        if img.format != 'PNG' or img.width * img.height > 20_000_000:
+            raise BridgeError('待发送图片不是有效 PNG 或尺寸过大')
+        img.verify()
+    if before_send:before_send()
+    window, edit, button, _ = bridge._prepare_send(contact, '[图片]')
+    baseline = bridge.snapshot(contact)
+    observer = getattr(bridge, 'receipt_observer', None)
+    original = edit.window_text()
+    draft = ChatDraft(bridge, window, edit, contact, original) if original else None
+    clipboard = clipboard_read()
+    pasted = confirmed = attempted = False
+    try:
+        if draft:draft.stash()
+        if observer:observer('prepared', baseline, 0)
+        with tempfile.TemporaryDirectory(prefix='relay-image-') as folder:
+            path = Path(folder) / (Path(folder).name + '.png')
+            path.write_bytes(data)
+
+            def verify(target):
+                bridge._check_account(contact)
+                if bridge._title(window) != contact['lookup']:
+                    raise SendUncertain('图片发送前聊天窗口发生变化，未点击发送')
+                if win32gui.GetAncestor(win32gui.GetForegroundWindow(), 2) != target.handle:
+                    raise SendUncertain('图片发送前焦点发生变化，未点击发送')
+                if before_send:before_send()
+
+            verify(window)
+            if edit.window_text():raise BridgeError('图片粘贴前输入框发生变化')
+            SystemSettings.copy_files_to_clipboard(filepaths_list=[str(path)])
+            verify(window)
+            # Some builds send on paste. Persist intent before any possible send.
+            if observer:observer('attempted')
+            pasted = True
+            pyautogui.hotkey('ctrl', 'v', _pause=False)
+            time.sleep(.5)
+            target, send_button = window, button
+            for _ in range(20):
+                # Weixin 4.1 inserts a single rich image object into the empty
+                # editor, without exposing its filename through UI Automation.
+                if edit.window_text() == '\ufffc' and button.is_enabled():
+                    break
+                receipt = match_image(baseline, bridge.snapshot(contact))
+                if receipt:
+                    confirmed = True
+                    return receipt['key']
+                candidates = [window]
+                try:
+                    candidates += [w for w in bridge.desktop.windows(process=window.process_id())
+                                   if w.handle != window.handle and 'Dialog' in w.class_name()]
+                except AttributeError:pass
+                found = False
+                for candidate in candidates:
+                    controls = candidate.descendants()
+                    # The unique clipboard path/name must appear in the preview,
+                    # not merely a generic enabled chat Send button.
+                    preview = any(path.name in c.window_text() for c in controls)
+                    buttons = [c for c in controls if c.element_info.control_type == 'Button'
+                               and c.window_text() in ('发送','发送(S)','Send','send','傳送') and c.is_enabled()]
+                    if preview and buttons:
+                        target, send_button = candidate, buttons[-1]
+                        found = True
+                        break
+                if found:break
+                time.sleep(.25)
+            else:
+                bridge._record('send.image.preview_unconfirmed', contact,
+                    controls=[{'class':c.class_name(),'type':c.element_info.control_type}
+                              for c in controls][-50:] if candidates else [])
+                raise SendUncertain('图片预览尚未核对，未点击发送，请检查微信')
+            verify(target)
+            attempted = True
+            bridge._click(send_button, contact, 'ui.image.send_once')
+            for _ in range(40):
+                time.sleep(.25)
+                receipt = match_image(baseline, bridge.snapshot(contact))
+                if receipt:
+                    confirmed = True
+                    bridge._record('send.image.confirmed', contact, source_key=receipt['key'])
+                    return receipt['key']
+            raise SendUncertain('已尝试发送图片，但未核对到新增的本人图片消息，请在微信确认；不会自动重发')
+    except (SendUncertain, ReplySuperseded):
+        raise
+    except Exception as exc:
+        if pasted:raise SendUncertain('图片发送过程被打断，请在微信核对；不会自动重发') from exc
+        raise
+    finally:
+        try:
+            if draft:
+                # An unconfirmed rich image must not be overwritten with a draft.
+                if pasted and not confirmed:
+                    bridge._record('send.draft.restore_pending',contact,backup=str(draft.backup or ''))
+                    raise SendUncertain('图片发送结果待核对，原草稿保存在恢复备份：'+str(draft.backup or ''))
+                try:draft.restore('', attempted)
+                except Exception as exc:
+                    raise SendUncertain('图片发送结果请在微信核对，原草稿保存在恢复备份：'+str(draft.backup or '')) from exc
+        finally:
+            try:clipboard_write(clipboard)
+            except Exception:bridge._record('send.image.clipboard_restore_failed',contact)
 
 
 def encode_image(image):

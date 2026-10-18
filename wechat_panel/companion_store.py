@@ -45,6 +45,12 @@ class CompanionStore:
                 CREATE TABLE IF NOT EXISTS companion_occurrences(
                     id TEXT PRIMARY KEY,schedule_id TEXT NOT NULL,due_at TEXT NOT NULL,run_id TEXT,
                     status TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(schedule_id,due_at));
+                CREATE TABLE IF NOT EXISTS companion_daily_context(
+                    scope TEXT PRIMARY KEY,cache_key TEXT NOT NULL,data TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS companion_image_observations(
+                    scope TEXT NOT NULL,media_id TEXT NOT NULL,model_key TEXT NOT NULL,
+                    description TEXT NOT NULL,created_at TEXT NOT NULL,
+                    PRIMARY KEY(scope,media_id,model_key));
             ''')
             cols={r['name'] for r in db.execute('PRAGMA table_info(companion_memories)')}
             if 'key_hash' not in cols:
@@ -63,6 +69,17 @@ class CompanionStore:
                 raise ValueError('测试记忆需要独立会话 ID')
             identity='sandbox:'+session_id
         return hashlib.sha256((agent_id+':'+identity).encode()).hexdigest()
+
+    def daily_context(self,scope,cache_key):
+        with self.store.connect() as db:
+            row=db.execute('SELECT data FROM companion_daily_context WHERE scope=? AND cache_key=?',
+                           (scope,cache_key)).fetchone()
+        return json.loads(unprotect(row['data'])) if row else None
+
+    def save_daily_context(self,scope,cache_key,data):
+        with self.store.connect() as db:
+            db.execute('INSERT INTO companion_daily_context VALUES(?,?,?) ON CONFLICT(scope) DO UPDATE SET cache_key=excluded.cache_key,data=excluded.data',
+                       (scope,cache_key,protect(json.dumps(data,ensure_ascii=False))))
 
     def profile(self,scope,agent_id='',contact_id=None):
         with self.store.connect() as db:
@@ -127,6 +144,8 @@ class CompanionStore:
             db.execute("UPDATE companion_profiles SET revision=revision+1,summary='',mood='',forget_before=?,updated_at=? WHERE scope=?",(boundary,now(),scope))
             # Prevent the old transcript from silently re-creating deleted facts.
             db.execute('DELETE FROM companion_turns WHERE scope=?',(scope,))
+            db.execute('DELETE FROM companion_daily_context WHERE scope=?',(scope,))
+            db.execute('DELETE FROM companion_image_observations WHERE scope=?',(scope,))
         return len(rows)
 
     def retrieve(self,scope,query,limit=6):
@@ -156,7 +175,7 @@ class CompanionStore:
             from PIL import Image
             image=Image.open(BytesIO(data))
             if image.width*image.height>20_000_000:raise ValueError('图片尺寸过大')
-            image=image.convert('RGB');image.thumbnail((1536,1536))
+            image=image.convert('RGBA' if image.mode in ('RGBA','LA') or 'transparency' in image.info else 'RGB');image.thumbnail((1536,1536))
             output=BytesIO();image.save(output,format='PNG');data=output.getvalue();mime='image/png'
         elif mime not in ('audio/mpeg','audio/wav','audio/flac'):raise ValueError('不支持的音频格式')
         mid=str(uuid.uuid4())
@@ -168,6 +187,21 @@ class CompanionStore:
         with self.store.connect() as db:row=db.execute('SELECT * FROM companion_media WHERE id=?',(mid,)).fetchone()
         if not row or (scope and row['scope']!=scope):raise KeyError('媒体不存在或不属于当前会话')
         return {**dict(row),'data':base64.b64decode(unprotect(row['data']))}
+
+    def image_observation(self,scope,mid,model_key):
+        with self.store.connect() as db:
+            row=db.execute('SELECT description FROM companion_image_observations WHERE scope=? AND media_id=? AND model_key=?',
+                           (scope,mid,model_key)).fetchone()
+        return unprotect(row[0]) if row else None
+
+    def save_image_observation(self,scope,mid,model_key,description,revision):
+        with self.store.connect() as db:
+            profile=db.execute('SELECT revision FROM companion_profiles WHERE scope=?',(scope,)).fetchone()
+            if not profile or profile[0]!=revision:return
+            db.execute('INSERT OR REPLACE INTO companion_image_observations VALUES(?,?,?,?,?)',
+                       (scope,mid,model_key,protect(description[:4000]),now()))
+            db.execute('DELETE FROM companion_image_observations WHERE scope=? AND rowid NOT IN '
+                       '(SELECT rowid FROM companion_image_observations WHERE scope=? ORDER BY created_at DESC LIMIT 80)',(scope,scope))
 
     def schedules(self):
         with self.store.connect() as db:rows=db.execute('SELECT * FROM companion_schedules ORDER BY created_at DESC').fetchall()

@@ -22,6 +22,10 @@ class WindowTransition(BridgeError):
     """A minimize transition can be retried on the next passive poll."""
 
 
+class DesktopBusy(BridgeError):
+    """No paste/send has begun; the serial queue can safely wait and retry."""
+
+
 class ConnectionLost(BridgeError):
     """The chat can be rebound without changing its verified identity."""
 
@@ -87,7 +91,7 @@ def image_direction(image, bounds, scale=1, visible_bounds=None):
 
     Bounds are relative to the captured native window. Only a visible avatar
     on one side AND clear background on the other are sufficient evidence.
-    Clipped rows, blank captures, dark themes and ambiguous layouts stay unknown.
+    Clipped avatars, blank captures, dark themes and ambiguous layouts stay unknown.
     """
     from PIL import ImageStat
     left, top, right, bottom = bounds
@@ -95,7 +99,9 @@ def image_direction(image, bounds, scale=1, visible_bounds=None):
     y = top + round(8*scale)
     end = min(bottom-round(8*scale), y+width)
     clip=visible_bounds or (0,0,image.width,image.height)
-    if (left < 0 or top < 0 or right > image.width or bottom > image.height
+    # A long bubble can extend below the viewport while its avatar is fully
+    # visible. Check the sampled avatar bounds, not the entire message height.
+    if (left < 0 or top < 0 or right > image.width or end > image.height
             or y < clip[1] or end > clip[3] or end-y < width or right-left < 4*width):
         return 'unknown'
     sides = []
@@ -112,6 +118,38 @@ def image_direction(image, bounds, scale=1, visible_bounds=None):
         return 'incoming'
     if sides[1][0] and sides[0][1]:
         return 'outgoing'
+    return 'unknown'
+
+
+def clipped_text_direction(image, bounds, scale=1, visible_bounds=None):
+    """Recognize a long outgoing text bubble when its avatar is above the view.
+
+    Only call for native text rows. Pictures/stickers can contain these colors.
+    Several visible strips must show the green right bubble and clear left
+    margin; white/blank/dark or ambiguous captures remain unknown.
+    """
+    left,top,right,bottom=bounds
+    clip=visible_bounds or (0,0,image.width,image.height)
+    start=max(0,top,clip[1])+round(8*scale)
+    end=min(image.height,bottom,clip[3])-round(8*scale)
+    size=max(2,round(6*scale))
+    if (top>=clip[1] or end-start<48*scale or right-left<240*scale
+            or left<0 or right>image.width):return 'unknown'
+    # Sample several columns, including bubble padding. A fixed single column
+    # often lands on dark text in a long reply and misses its green background.
+    for offset in (76,82,88,94):
+        xs=(left+round(82*scale),right-round(offset*scale))
+        if any(x<max(0,clip[0]) or x+size>min(image.width,clip[2]) for x in xs):continue
+        matches=0
+        for i in range(9):
+            y=round(start+(end-start-size)*i/8)
+            crops=[image.crop((x,y,x+size,y+size)).convert('RGB') for x in xs]
+            patches=[list(getattr(crop,'get_flattened_data',crop.getdata)()) for crop in crops]
+            clear=sum(min(p)>235 for p in patches[0])/len(patches[0])>.9
+            green=sum(90<=r<=210 and 200<=g<=255 and 90<=b<=210 and g-max(r,b)>40
+                      for r,g,b in patches[1])/len(patches[1])>.8
+            matches+=clear and green
+        if matches>=6:return 'outgoing'
     return 'unknown'
 
 
@@ -147,6 +185,23 @@ class DemoBridge:
     def send(self, contact, text):
         self.inspect(contact['lookup'], contact['wechat_id'], contact['account_id'])
         return self.inject(contact, text, 'outgoing')['key']
+
+    def send_file(self, contact, path):
+        key = self.send(contact, path.name)
+        self.history[contact['id']][-1]['kind'] = 'file'
+        return key
+
+    def send_voice(self, contact, text, before_send=None):
+        if before_send:before_send()
+        key=self.send(contact,text)
+        self.history[contact['id']][-1]['kind']='voice'
+        return self.history[contact['id']][-1]
+
+    def send_image(self, contact, data, before_send=None):
+        if before_send:before_send()
+        key=self.send(contact,'[图片]')
+        self.history[contact['id']][-1]['kind']='image'
+        return key
 
     def detach(self, contact_id):
         pass
@@ -185,6 +240,7 @@ class WeixinBridge:
         self.profiles = {}
         self.verified_contacts = set()
         self.previous_items = {}
+        self.defer_for_input = True
         self.image_cache = {}
         self.image_pending = {}
         self.avatar_cache = {}
@@ -291,28 +347,19 @@ class WeixinBridge:
         return self.account_id
 
     def _main_window(self):
-        import psutil
-        candidates = [w for w in self.desktop.windows(class_name='mmui::MainWindow', visible_only=False)
-                      if psutil.Process(w.process_id()).name().lower() == 'weixin.exe']
+        from .wechat_windows import discover_weixin_windows
+        windows=discover_weixin_windows()
+        self._login_windows=[w for w in windows if w['kind']=='mmui::LoginWindow']
+        candidates=[w for w in windows if w['kind']=='mmui::MainWindow']
+        signature=tuple((w['handle'],w['pid'],w['started_at'],w['kind']) for w in windows)
+        if signature!=getattr(self,'_discovery_signature',None):
+            self._record('connection.windows',windows=windows)
+            self._discovery_signature=signature
         if not candidates:
-            # Qt removes a tray-hidden main window from the UIA desktop tree.
-            # Recover only its previously verified HWND in the same process;
-            # this read does not restore or focus the main window.
-            import win32gui
-            import win32process
-            try:
-                context = json.loads(self.account_path.read_text(encoding='utf-8'))['context']
-                handle, pid = context['main_handle'], context['pid']
-                process = psutil.Process(pid)
-                if (win32gui.IsWindow(handle) and win32process.GetWindowThreadProcessId(handle)[1] == pid
-                        and process.name().lower() == 'weixin.exe'
-                        and process.create_time() == context['started_at']):
-                    return self.desktop.window(handle=handle)
-            except (OSError, ValueError, KeyError, AttributeError, psutil.Error):
-                pass
-        if len(candidates) != 1:
-            raise BridgeError('无法唯一识别已登录的微信主窗口')
-        return self.desktop.window(handle=candidates[0].handle)
+            raise ConnectionLost('暂未发现微信主窗口，正在自动重试')
+        if len(candidates)>1:
+            raise BridgeError(f'检测到 {len(candidates)} 个微信主窗口，为避免串号已停止自动选择；请保留一个登录窗口后重试')
+        return self.desktop.window(handle=candidates[0]['handle'])
 
     def _open_main(self, is_maximize=None, window_size=None):
         import win32gui
@@ -434,27 +481,42 @@ class WeixinBridge:
                         ctypes.windll.user32.AttachThreadInput(current, thread, False)
             time.sleep(0.1)
         if win32gui.GetAncestor(win32gui.GetForegroundWindow(), 2) != window.handle:
-            raise BridgeError('目标聊天窗口未获得前台焦点，已停止操作')
+            raise DesktopBusy('目标聊天窗口未获得前台焦点，等待空闲后重试')
 
     def _click(self, control, contact, action):
         import pyautogui
         import win32gui
-        rect = control.rectangle()
-        if rect.width() <= 0 or rect.height() <= 0:
-            raise BridgeError('目标控件不可见，已停止操作')
         root = control.top_level_parent().handle
-        if win32gui.GetAncestor(win32gui.WindowFromPoint((rect.mid_point().x, rect.mid_point().y)), 2) != root:
-            raise BridgeError('目标控件被其他窗口遮挡，已停止操作')
-        self._record(action, contact)
-        pyautogui.click(rect.mid_point().x, rect.mid_point().y, _pause=False)
+        # Restoring an offscreen Qt window can leave UIA bounds stale briefly.
+        # Re-read the actual control bounds before every hit test. Never click
+        # through an overlay, and never try to dismiss it with guessed clicks.
+        hit = None
+        for attempt in range(11):
+            rect = control.rectangle()
+            if rect.width() <= 0 or rect.height() <= 0:
+                raise BridgeError('目标控件不可见，已停止操作')
+            point = (rect.mid_point().x, rect.mid_point().y)
+            hit = win32gui.GetAncestor(win32gui.WindowFromPoint(point), 2)
+            if hit == root:
+                if action in ('ui.input.focus','ui.send_once') and win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)!=root:
+                    raise DesktopBusy('用户正在切换窗口，等待空闲后重试')
+                self._record(action, contact)
+                pyautogui.click(*point, _pause=False)
+                return
+            if attempt < 10:
+                time.sleep(0.1)
+        self._record('ui.click_blocked', contact, target=root, covering=hit, requested=action)
+        raise DesktopBusy('目标控件被其他窗口遮挡，等待空闲后重试')
 
     def _visible_text_count(self, window, contact, text):
+        from .wechat_text import receipt_text
+        expected = receipt_text(text)
         count = 0
         for row in window.child_window(**self.Lists.FriendChatList).children():
             if row.class_name() != 'mmui::ChatTextItemView':
                 continue
             _, body = self._direction(row, window, contact)
-            count += body == text
+            count += receipt_text(body) == expected
         return count
 
     def _input_desktop(self):
@@ -483,7 +545,7 @@ class WeixinBridge:
         try:
             main = self._main_window()
         except BridgeError as exc:
-            if self.desktop.windows(class_name='mmui::LoginWindow', visible_only=False):
+            if getattr(self,'_login_windows',[]) or self.desktop.windows(class_name='mmui::LoginWindow', visible_only=False):
                 self.windows.clear()
                 self.profiles.clear()
                 self.verified_contacts.clear()
@@ -861,7 +923,11 @@ class WeixinBridge:
             image, (left, top), scale = frame
             rect = item.rectangle()
             clip=tuple(v-offset for v,offset in zip(visible_bounds,(left,top,left,top))) if visible_bounds else None
-            return image_direction(image, (rect.left-left, rect.top-top, rect.right-left, rect.bottom-top), scale,clip), text
+            bounds=(rect.left-left, rect.top-top, rect.right-left, rect.bottom-top)
+            direction=image_direction(image,bounds,scale,clip)
+            if direction=='unknown' and item.class_name()=='mmui::ChatTextItemView':
+                direction=clipped_text_direction(image,bounds,scale,clip)
+            return direction,text
         # Never convert an unproven direction into an Agent request.
         return 'unknown', text
 
@@ -889,6 +955,7 @@ class WeixinBridge:
         clip=listing.rectangle()
         items = []
         photos=[]
+        folded_texts=[]
         previous={i['key'] for i in self.previous_items.get(contact['id'],[])}
         for row in rows:
             cls = row.class_name()
@@ -899,7 +966,9 @@ class WeixinBridge:
                 continue
             direction, text = self._direction(row, window, contact, frame,
                                                (clip.left,clip.top,clip.right,clip.bottom))
-            kind = 'text' if cls == 'mmui::ChatTextItemView' else 'unknown'
+            kind = 'text' if cls == 'mmui::ChatTextItemView' else 'voice' if cls == 'mmui::ChatVoiceItemView' else 'file' if 'File' in cls else 'unknown'
+            if cls == 'mmui::ChatBubbleItemView' and text.split('\n', 1)[0] in ('文件', '檔案', 'File'):
+                kind = 'file'
             photo=None
             if cls in ('mmui::ChatImageItemView','mmui::ChatImgItemView'):
                 kind='image'
@@ -921,6 +990,9 @@ class WeixinBridge:
                               direction=direction, kind=kind, account_id=contact['account_id'],
                               direction_verified=direction in ('incoming','outgoing')))
             if photo:items[-1]['image_data']=photo
+            if kind=='text' and direction=='incoming':
+                from .wechat_fulltext import folded
+                if folded(text):folded_texts.append((items[-1],tuple(row.element_info.runtime_id)))
             if kind=='image' and contact.get('_read_images') and contact['id'] in self.previous_items and key not in previous:
                 self.image_pending.setdefault(key,{'attempts':0,'due':0})
             if kind=='image' and direction=='incoming' and contact.get('_read_images'):
@@ -937,6 +1009,12 @@ class WeixinBridge:
         # Keep the previous observation for this tick instead of misattributing it.
         if layout != [(row.window_text(), str(row.rectangle())) for row in listing.children()]:
             return self.previous_items.get(cid, [])
+        if folded_texts:
+            from .wechat_fulltext import hydrate
+            from .snapshots import compare
+            delta = compare(self.previous_items.get(cid),items)
+            new_keys = {item['key'] for item in delta.items} if not delta.historical else set()
+            hydrate(self,window,contact,folded_texts,new_keys=new_keys)
         available=[p for p in photos if self.image_pending[p[0]['key']]['attempts']<3 and time.monotonic()>=self.image_pending[p[0]['key']]['due']]
         for item,runtime_id in available[:1]:
             pending=self.image_pending[item['key']]
@@ -955,11 +1033,21 @@ class WeixinBridge:
         visible_keys={item['key'] for item in items}
         for key in list(self.image_pending):
             if key.startswith(str(window.handle)+':') and key not in visible_keys:self.image_pending.pop(key,None)
+        from .snapshots import align
+        items=align(self.previous_items.get(cid),items)
         self.previous_items[cid] = items
         return items
 
     def _prepare_send(self, contact, text):
         import win32gui
+        if getattr(self,'defer_for_input',False):
+            import ctypes
+            class LastInput(ctypes.Structure):
+                _fields_=[('size',ctypes.c_uint),('tick',ctypes.c_uint)]
+            last=LastInput();last.size=ctypes.sizeof(last)
+            if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(last)):
+                elapsed=(ctypes.windll.kernel32.GetTickCount()-last.tick)&0xffffffff
+                if elapsed<900:raise DesktopBusy('检测到键盘或鼠标操作，等待电脑短暂空闲后发送')
         for attempt in range(2):
             try:
                 window = self.windows.get(contact['id'])
@@ -982,11 +1070,9 @@ class WeixinBridge:
                                              control_type='Button', class_name='mmui::XOutlineButton')
                 if not edit.exists(timeout=0.3) or not button.exists(timeout=0.3):
                     raise ConnectionLost('发送前聊天输入框暂时不可用')
-                if edit.window_text():
-                    raise BridgeError('微信输入框已有草稿，请先在微信处理草稿后发送')
                 self._click(edit, contact, 'ui.input.focus')
                 if win32gui.GetAncestor(win32gui.GetForegroundWindow(), 2) != window.handle:
-                    raise BridgeError('微信聊天窗口未获得前台焦点，已停止发送')
+                    raise DesktopBusy('微信聊天窗口未获得前台焦点，等待空闲后重试')
                 return window, edit, button, before_count
             except Exception as exc:
                 if not connection_error(exc) or attempt:
@@ -995,15 +1081,74 @@ class WeixinBridge:
                 self._record('send.reconnect', contact)
                 time.sleep(0.15)
 
+    def send_file(self, contact, path):
+        from .wechat_files import send_pdf
+        return send_pdf(self, contact, path)
+
+    def send_voice(self, contact, path, before_send=None):
+        from .wechat_voice import send_wav
+        import win32gui
+        foreground=win32gui.GetForegroundWindow()
+        try:return send_wav(self, contact, path, before_send=before_send)
+        finally:
+            window=self.windows.get(contact['id'])
+            if window and foreground:
+                try:
+                    if (win32gui.IsWindow(foreground) and foreground!=window.handle
+                            and win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)==window.handle):
+                        win32gui.SetForegroundWindow(foreground)
+                except Exception:pass
+
+    def send_image(self, contact, data, before_send=None):
+        from .wechat_images import send_image
+        import win32gui
+        foreground=win32gui.GetForegroundWindow()
+        try:return send_image(self,contact,data,before_send=before_send)
+        finally:
+            window=self.windows.get(contact['id'])
+            if window and foreground:
+                try:
+                    if (win32gui.IsWindow(foreground) and foreground!=window.handle
+                            and win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)==window.handle):
+                        win32gui.SetForegroundWindow(foreground)
+                except Exception:pass
+
     def send(self, contact, text):
+        import win32gui
+        foreground=win32gui.GetForegroundWindow()
+        try:return self._send_text(contact,text)
+        finally:
+            window=self.windows.get(contact['id'])
+            if window and foreground:
+                try:
+                    if (win32gui.IsWindow(foreground) and foreground!=window.handle
+                            and win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)==window.handle):
+                        win32gui.SetForegroundWindow(foreground)
+                except Exception:pass
+
+    def _send_text(self, contact, text):
         import pyautogui
         import win32gui
         from pyweixin import SystemSettings
         self._record('send.begin', contact)
         window, edit, button, before_count = self._prepare_send(contact, text)
-        SystemSettings.copy_text_to_clipboard(text)
+        baseline=[dict(x) for x in self.snapshot(contact)]
+        observer=getattr(self,'receipt_observer',None)
+        if observer:observer('prepared',baseline,before_count)
+        from .wechat_draft import ChatDraft
+        original = edit.window_text()
+        draft = ChatDraft(self, window, edit, contact, original) if original else None
+        send_attempted = False
+        confirmed = False
         # Once paste/send starts, any exception is uncertain and MUST NOT retry.
         try:
+            if draft:
+                draft.stash()
+            if win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)!=window.handle or edit.window_text():
+                raise SendUncertain('粘贴前焦点或输入内容已变化，尚未发送；已保护现有输入内容')
+            SystemSettings.copy_text_to_clipboard(text)
+            if win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)!=window.handle:
+                raise SendUncertain('粘贴前焦点已变化，尚未发送；已停止键盘输入')
             self._record('ui.input.paste', contact)
             pyautogui.hotkey('ctrl', 'v', _pause=False)
             time.sleep(0.2)
@@ -1013,20 +1158,37 @@ class WeixinBridge:
                 raise SendUncertain('发送前焦点发生变化，请检查微信输入框')
             if not button.is_enabled():
                 raise SendUncertain('发送按钮未启用，尚未点击发送；请检查微信输入框')
+            send_attempted = True
+            if observer:observer('attempted')
             self._click(button, contact, 'ui.send_once')
-            for _ in range(12):
+            from .send_receipts import match
+            for attempt in range(12):
                 time.sleep(0.25)
-                if edit.window_text():
-                    continue
                 items = self.snapshot(contact)
-                matches = [x for x in items if x['text'] == text and x['direction'] == 'outgoing']
-                if matches and sum(x['text'] == text for x in items) > before_count:
-                    self._record('send.confirmed', contact, source_key=matches[-1]['key'])
-                    return matches[-1]['key']
-            raise SendUncertain('已尝试发送，但未能核对新增的本人消息；请在微信确认，勿重复发送')
+                found=match(baseline,items,text,before_count)
+                if found:
+                    self._record('send.confirmed', contact, source_key=found['key'])
+                    confirmed = True
+                    return found['key']
+                if attempt in (3,7):
+                    # Request a redraw without focusing, clicking, or sending.
+                    try:
+                        import win32con
+                        win32gui.RedrawWindow(window.handle,None,None,win32con.RDW_INVALIDATE|win32con.RDW_UPDATENOW|win32con.RDW_ALLCHILDREN)
+                    except Exception:pass
+            raise SendUncertain('已尝试发送，但暂未能核对新增的本人消息；已安排后台复核（最多 2 分钟），请勿重复发送')
         except SendUncertain:
             self._record('send.uncertain', contact)
             raise
         except Exception as exc:
             self._record('send.interrupted', contact, error=str(exc))
             raise SendUncertain('发送过程被打断，请在微信核对结果后处理') from exc
+        finally:
+            if draft:
+                try:
+                    draft.restore(text, send_attempted)
+                except Exception as exc:
+                    self._record('send.draft.restore_pending', contact,
+                                 backup=str(draft.backup or ''), confirmed=confirmed)
+                    detail = '消息已确认发送' if confirmed else '发送结果需要核对'
+                    raise SendUncertain(detail + '，原草稿暂未恢复，已保留恢复备份：' + str(draft.backup or '')) from exc

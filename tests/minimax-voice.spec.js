@@ -1,0 +1,168 @@
+const {test,expect}=require('@playwright/test');
+const headers={'X-Panel-Request':'1'};
+const preset='minimax:Chinese (Mandarin)_ExplorativeGirl';
+
+test('MiniMax 配置、克隆、试听及每位联系人独立保存模型',async({page,request})=>{
+  const create=async name=>(await request.post('/api/contacts',{headers,data:{lookup:name,wechat_id:name}})).json();
+  const a=await create('MiniMax 音色体验'),b=await create('其他音色用户');
+  const errors=[],previews=[],clones=[],applied=[];let created=false,chosen=false;
+  page.on('pageerror',e=>errors.push(e.message));
+  const wav=Buffer.alloc(44+24000*2*12);wav.write('RIFF');wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(24000,24);wav.writeUInt32LE(48000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(wav.length-44,40);
+  for(let i=44;i<wav.length;i+=2)wav.writeInt16LE(Math.round(Math.sin(i*.1)*6000),i);
+  await page.route('**/api/voice/voices',async route=>{
+    const response=await route.fetch();const body=await response.json();
+    body.voices.push(...Array.from({length:300},(_,i)=>({id:'minimax:system-'+i,name:'系统音色 '+i,engine:'minimax',kind:'system',selectable:false})));
+    if(created)body.voices.push({id:'minimax:RelayTestClone',voice:'RelayTestClone',name:'MiniMax · 阿慧的专属声音',engine:'minimax',kind:'clone',description:'自定义克隆音色'});
+    await route.fulfill({response,json:body});
+  });
+  await page.route('**/api/voice/minimax/refresh',r=>r.fulfill({json:{detail:'连接成功',count:4}}));
+  await page.route('**/api/voice/minimax/clones/**',async r=>{
+    clones.push({body:r.request().postDataBuffer(),url:r.request().url()});created=true;
+    await r.fulfill({json:{status:'ready',name:'阿慧的专属声音',voice_id:'minimax:RelayTestClone'}});
+  });
+  await page.route('**/api/voice/preview',async r=>{
+    previews.push(r.request().postDataJSON());await r.fulfill({contentType:'audio/wav',body:wav});
+  });
+  // Mock the remote-created voice's save; backend clone persistence is covered in test_minimax_voice.py.
+  await page.route('**/api/contacts/'+a.id,async route=>{
+    const body=route.request().postDataJSON();
+    if(route.request().method()!=='PATCH'||body?.voice_preset!=='minimax:RelayTestClone')return route.continue();
+    applied.push(body);chosen=true;await route.fulfill({json:{...a,voice_preset:body.voice_preset}});
+  });
+  await page.route('**/api/bootstrap',async route=>{
+    const response=await route.fetch(),body=await response.json();
+    if(chosen)body.contacts.find(c=>c.id===a.id).voice_preset='minimax:RelayTestClone';
+    await route.fulfill({response,json:body});
+  });
+  await page.goto('/');await page.getByRole('button',{name:'打开 MiniMax 音色体验 的聊天',exact:true}).click();
+  await page.locator('#reply-format').selectOption('voice');
+  await page.locator('#voice-preset').selectOption(preset);
+  await expect(page.locator('#voice-preview')).toBeDisabled();
+  await page.getByRole('button',{name:'MiniMax 设置与声音克隆',exact:true}).click();
+  await expect(page.locator('#minimax-clone-submit')).toBeDisabled();
+  await page.locator('#minimax-key').fill('fake-test-key-not-live');
+  await page.getByRole('button',{name:'保存设置',exact:true}).click();
+  await expect(page.locator('#minimax-key-status')).toHaveText('Key 已保存');
+  await expect(page.locator('#minimax-key')).toHaveValue('');
+  await page.getByRole('button',{name:'检测连接并同步音色',exact:true}).click();
+  await expect(page.locator('#minimax-config-status')).toContainText('连接成功');
+  await expect(page.locator('#voice-preset optgroup[label="MiniMax 预设音色"] option')).toHaveText([
+    'MiniMax · 漫游少女','MiniMax · 热心女孩','MiniMax · 智性少女']);
+  await expect(page.locator('#voice-preset optgroup[label="在线音色"] option')).toHaveText([
+    '晓晓 · 温柔陪伴','晓伊 · 元气甜美']);
+  await page.locator('#minimax-clone-name').fill('阿慧的专属声音');
+  await page.locator('#minimax-clone-file').setInputFiles({name:'ahui-sample.wav',mimeType:'audio/wav',buffer:wav});
+  await expect(page.locator('#minimax-source-audio')).toBeVisible();
+  await page.getByRole('button',{name:'上传并创建音色',exact:true}).click();
+  await expect(page.locator('#minimax-clone-status')).toContainText('已创建');
+  expect(clones).toHaveLength(1);expect(clones[0].body.equals(wav)).toBe(true);
+  await expect(page.locator('#voice-preset option[value="minimax:RelayTestClone"]')).toHaveCount(1);
+  const own=page.locator('#minimax-my-voices');
+  await expect(own).toContainText('阿慧的专属声音');
+  await expect(own).toBeInViewport();
+  await expect(page.locator('#voice-preset optgroup').first()).toHaveAttribute('label','MiniMax 专属音色');
+  expect(previews).toHaveLength(0);expect(applied).toHaveLength(0);
+  await page.getByText('试听模型与文本',{exact:true}).click();
+  await page.locator('#minimax-preview-model').selectOption('speech-2.8-hd');
+  await page.locator('#minimax-preview-text').fill('专属声音试听，不修改联系人。');
+  await own.getByRole('button',{name:'试听这个音色',exact:true}).click();
+  await expect(page.locator('#minimax-preview-audio')).toBeVisible();
+  expect(previews.at(-1)).toEqual({voice_id:'minimax:RelayTestClone',model:'speech-2.8-hd',text:'专属声音试听，不修改联系人。'});
+  expect((await (await request.get('/api/contacts')).json()).find(c=>c.id===a.id).voice_preset).toBe(preset);
+  expect(applied).toHaveLength(0);
+  await page.locator('#minimax-dialog').screenshot({path:test.info().outputPath('minimax-settings.png')});
+  await page.getByRole('button',{name:'放弃更改',exact:true}).click();
+  await expect(page.locator('#minimax-preview-audio')).toBeHidden();
+  // Creating a clone alone must not activate it or change contact settings.
+  await expect(page.locator('#voice-preset')).toHaveValue(preset);
+  await page.locator('#voice-model').selectOption('speech-2.8-hd');
+  await expect.poll(async()=>(await (await request.get('/api/contacts')).json()).find(c=>c.id===a.id).voice_model).toBe('speech-2.8-hd');
+  await page.getByRole('button',{name:'试听音色',exact:true}).click();
+  await expect(page.locator('#voice-preview-audio')).toBeVisible();
+  await expect.poll(()=>page.locator('#voice-preview-audio').evaluate(el=>el.readyState)).toBeGreaterThanOrEqual(2);
+  expect(previews.at(-1)).toMatchObject({voice_id:preset,model:'speech-2.8-hd'});
+  expect((await (await request.get('/api/contacts/'+a.id+'/messages')).json()).length).toBe(0);
+  await page.locator('#voice-studio').screenshot({path:test.info().outputPath('minimax-preview.png')});
+  await page.getByRole('button',{name:'打开 其他音色用户 的聊天',exact:true}).click();
+  expect((await (await request.get('/api/contacts')).json()).find(c=>c.id===b.id).voice_model).toBe('speech-2.8-turbo');
+  await expect(page.locator('#voice-preview-audio')).toBeHidden();
+  await page.reload();await page.getByRole('button',{name:'打开 MiniMax 音色体验 的聊天',exact:true}).click();
+  await expect(page.locator('#voice-model')).toHaveValue('speech-2.8-hd');
+  await expect(page.locator('#voice-preset')).toHaveValue(preset);
+  await page.locator('#voice-model').selectOption('speech-2.8-turbo');
+  await expect.poll(async()=>(await (await request.get('/api/contacts')).json()).find(c=>c.id===a.id).voice_model).toBe('speech-2.8-turbo');
+  await page.getByRole('button',{name:'试听音色',exact:true}).click();
+  await expect(page.locator('#voice-preview-audio')).toBeVisible();
+  expect(previews.at(-1).model).toBe('speech-2.8-turbo');
+  await page.getByRole('button',{name:'MiniMax 设置与声音克隆',exact:true}).click();
+  await expect(own).toContainText('阿慧的专属声音');
+  await own.getByRole('button',{name:'选择音色',exact:true}).click();
+  await expect(own.getByRole('button',{name:'已选择',exact:true})).toBeDisabled();
+  expect(applied).toHaveLength(0);
+  await expect(page.locator('#minimax-save-state')).toHaveText('有未保存的修改');
+  await page.getByRole('button',{name:'保存设置',exact:true}).click();
+  await expect(page.locator('#minimax-save-state')).toHaveText('全部设置已保存');
+  expect(applied).toEqual([{voice_preset:'minimax:RelayTestClone'}]);
+  await expect(page.locator('#voice-preset')).toHaveValue('minimax:RelayTestClone');
+  expect((await (await request.get('/api/contacts')).json()).find(c=>c.id===b.id).voice_preset).toBe('windows-huihui');
+  await page.getByRole('tab',{name:'连接与声音克隆',exact:true}).click();
+  await page.getByRole('button',{name:'清除 Key',exact:true}).click();
+  await expect(page.locator('#minimax-key-status')).toHaveText('尚未配置 Key');
+  await page.locator('#minimax-done').click();
+  await expect(page.locator('#voice-preview')).toBeDisabled();
+  expect(errors).toEqual([]);
+});
+
+test('整体保存保留失败修改，上传区域与固定底栏适配窄屏',async({page,request})=>{
+  const a=await (await request.post('/api/contacts',{headers,data:{lookup:'整体保存测试',wechat_id:'settings-save'}})).json();
+  await request.patch('/api/contacts/'+a.id,{headers,data:{reply_format:'voice',voice_preset:preset}});
+  const errors=[];let fail=true,uploads=0;
+  page.on('pageerror',e=>errors.push(e.message));
+  await page.route('**/api/contacts/'+a.id,async route=>{
+    if(route.request().method()==='PATCH'&&fail)return route.fulfill({status:500,json:{detail:'测试保存失败'}});
+    return route.continue();
+  });
+  await page.route('**/api/voice/minimax/clones/**',route=>{uploads++;return route.abort();});
+  await page.route('**/api/voice/voices',async route=>{
+    const response=await route.fetch(),body=await response.json();
+    body.voices.push({id:'minimax:SavedClone',name:'我的专属声音',kind:'clone',engine:'minimax'});
+    await route.fulfill({response,json:body});
+  });
+  await page.goto('/');await page.getByRole('button',{name:'打开 整体保存测试 的聊天',exact:true}).click();
+  await page.locator('#minimax-open').click();
+  await page.getByRole('tab',{name:'音色与试听',exact:true}).click();
+  await page.getByText('试听模型与文本',{exact:true}).click();
+  await page.locator('#minimax-preview-model').selectOption('speech-2.8-hd');
+  await page.getByRole('tab',{name:'连接与声音克隆',exact:true}).click();
+  await page.locator('#minimax-key').fill('fake-global-save-key');
+  await page.locator('#minimax-clone-file').setInputFiles({name:'参考录音-温柔自然的日常说话声音.wav',mimeType:'audio/wav',buffer:Buffer.alloc(44)});
+  await expect(page.locator('#minimax-file-name')).toHaveText('参考录音-温柔自然的日常说话声音.wav');
+  await expect(page.locator('#minimax-file-action')).toHaveText('更换文件');
+  await page.locator('#minimax-dialog .voice-dialog-body').evaluate(el=>el.scrollTop=el.scrollHeight);
+  await expect(page.locator('#minimax-save')).toBeInViewport();
+  await page.locator('#minimax-dialog').screenshot({path:test.info().outputPath('voice-setup-desktop.png')});
+  await page.locator('#minimax-save').click();
+  await expect(page.locator('#minimax-save-state')).toContainText('Key 已保存；其余设置保存失败');
+  await expect(page.locator('#minimax-dialog')).toBeVisible();
+  await expect(page.locator('#minimax-key')).toHaveValue('');
+  await expect(page.locator('#minimax-preview-model')).toHaveValue('speech-2.8-hd');
+  expect((await (await request.get('/api/contacts')).json()).find(c=>c.id===a.id).voice_model).toBe('speech-2.8-turbo');
+  fail=false;await page.locator('#minimax-save').click();
+  await expect(page.locator('#minimax-save-state')).toHaveText('全部设置已保存');
+  expect((await (await request.get('/api/contacts')).json()).find(c=>c.id===a.id).voice_model).toBe('speech-2.8-hd');
+  expect(uploads).toBe(0);
+  await page.setViewportSize({width:390,height:740});
+  await page.locator('#minimax-dialog .voice-dialog-body').evaluate(el=>el.scrollTop=el.scrollHeight);
+  await expect(page.locator('#minimax-save')).toBeInViewport();
+  expect(await page.locator('#minimax-dialog').evaluate(el=>el.scrollWidth<=el.clientWidth)).toBe(true);
+  await page.locator('#minimax-dialog').screenshot({path:test.info().outputPath('voice-setup-mobile.png')});
+  await page.locator('#minimax-tab-setup').focus();await page.keyboard.press('ArrowLeft');
+  await expect(page.locator('#minimax-tab-voices')).toHaveAttribute('aria-selected','true');
+  await expect(page.locator('#minimax-tab-voices')).toBeFocused();
+  await page.locator('#minimax-preview-model').selectOption('speech-2.8-turbo');
+  await page.keyboard.press('Escape');await expect(page.locator('#minimax-dialog')).toBeVisible();
+  await expect(page.locator('#minimax-save-state')).toContainText('未保存');
+  await page.getByRole('button',{name:'放弃更改',exact:true}).click();
+  expect((await (await request.get('/api/contacts')).json()).find(c=>c.id===a.id).voice_model).toBe('speech-2.8-hd');
+  expect(errors).toEqual([]);
+});

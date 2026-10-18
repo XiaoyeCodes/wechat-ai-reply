@@ -1,4 +1,5 @@
-import {initAI, refreshAI, scheduleAIRefresh, renderContactAI} from './ai.js';
+import {initAI, refreshAI, scheduleAIRefresh, renderContactAI} from './ai.js?v=wechat-images-2';
+import {initVoice,renderVoice} from './voice.js?v=voice-settings-3';
 
 const paths = {
   chat:'M4 4h16v12H10l-6 4V4Z M8 8h8 M8 12h5',
@@ -66,7 +67,7 @@ function setView(view) {
   if(view==='status') renderStatus();
   if(view==='ai') refreshAI().catch(error=>toast(error.message,true));
 }
-document.querySelectorAll('.nav-item').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
+document.querySelectorAll('.nav-item[data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
 $('connection-button').onclick=$('banner-status').onclick=()=>setView('status');
 $('agent-details').onclick=()=>setView('agent');
 $('show-details').onclick=()=>$('detail-panel').classList.toggle('open');
@@ -123,6 +124,7 @@ function renderDetails() {
   const c=current();
   $('chat-empty').hidden=!!c;$('chat-content').hidden=!c;
   $('detail-empty').hidden=!!c;$('detail-content').hidden=!c;
+  renderVoice(c);
   if(!c)return;
   for(const id of ['chat-avatar','profile-avatar']) {
     const element=$(id), key=`${c.lookup}:${c.avatar_url||''}`;
@@ -138,6 +140,8 @@ function renderDetails() {
   $('listener-detail').textContent=listenerText(c);
   $('listener-error').hidden=!c.error;$('listener-error').textContent=c.error;
   $('conversation-mode').value=c.mode;
+  $('reply-format').value=c.reply_format||'text';
+  $('reply-format-hint').textContent=c.reply_format==='voice'?'已启用微信原生语音。长文、链接和审批仍用文字；录音时需要微信保持前台。可在微信说“改回文字回复”。':'仅对当前联系人生效。可在微信说“以后用语音回复”开启；人工输入仍发送文字。';
   $('retry-listener').hidden=c.listener_state!=='error';
   $('demo-controls').hidden=!state.status.demo;
   renderContactAI();
@@ -154,7 +158,7 @@ function renderMessages(force=false) {
     const divider=day!==date?`<div class="date-divider">${escape(day)}</div>`:'';date=day;
     if(m.direction==='system')return divider+`<div class="system-message">${escape(m.text)}</div>`;
     const outgoing=m.direction==='outgoing';
-    const labels=[dateText(m.created_at),m.origin==='ai'?'AI 回复':'',m.historical?'历史同步':'',m.direction==='unknown'?'方向待识别':'',messageLabels[m.status]||''].filter(Boolean);
+    const labels=[dateText(m.created_at),m.origin==='ai'?'AI 回复':m.origin==='approval'?'操作确认':'',m.kind==='voice'?'语音消息':'',m.historical?'历史同步':'',m.direction==='unknown'?'方向待识别':'',messageLabels[m.status]||''].filter(Boolean);
     const body=m.kind==='image'&&m.media_id?`<a href="/api/ai/media/${encodeURIComponent(m.media_id)}" target="_blank" rel="noopener"><img class="message-photo" src="/api/ai/media/${encodeURIComponent(m.media_id)}" alt="收到的图片" loading="lazy"></a>`:escape(m.text);
     return divider+`<div class="message-row ${escape(m.direction)}" data-message-id="${m.id}">${avatar(outgoing?'我':m.direction==='incoming'?current().lookup:'?',outgoing?current().self_avatar_url:m.direction==='incoming'?current().avatar_url:null)}<div class="message-column"><div class="message-bubble">${body}</div><div class="message-meta ${['uncertain','failed'].includes(m.status)?'error':''}">${labels.map(escape).join(' · ')}</div>${m.error?`<p class="message-error">${escape(m.error)}</p>`:''}</div></div>`;
   }).join(''):'<div class="list-empty">这里还没有消息<br>开启监听后会同步当前窗口可见消息</div>');
@@ -213,6 +217,7 @@ function patchContact(id,changes) {
 }
 $('listen-toggle').onclick=()=>{const c=current();if(c)patchContact(c.id,{listening:!c.listening});};
 $('conversation-mode').onchange=()=>{if(current())patchContact(state.selected,{mode:$('conversation-mode').value});};
+$('reply-format').onchange=()=>{if(current())patchContact(state.selected,{reply_format:$('reply-format').value});};
 $('retry-listener').onclick=()=>{if(current())patchContact(state.selected,{listening:true});};
 $('pause-button').onclick=async()=>{try{state.status=await api('/api/runtime/pause',{method:'POST',body:{paused:!state.status.paused}});render();}catch(error){toast(error.message,true);}};
 $('reconnect').onclick=async()=>{const b=$('reconnect');b.disabled=true;try{state.status=await api('/api/runtime/reconnect',{method:'POST'});render();toast('连接正在重新建立');}catch(error){toast(error.message,true);}finally{b.disabled=false;}};
@@ -257,20 +262,28 @@ async function renderStatus() {
   }catch(error){toast(error.message,true);}
 }
 function render() {renderHeader();renderConversations();renderDetails();renderContacts();renderMessages();if(state.view==='status')renderStatus();}
-let syncTimer;
+let syncTimer,syncPromise;
 function scheduleSync(){clearTimeout(syncTimer);syncTimer=setTimeout(sync,180);}
-async function sync() {
-  if(state.syncing){state.syncAgain=true;return;}
+function sync() {
+  if(state.syncing){state.syncAgain=true;return syncPromise;}
   state.syncing=true;
-  try {
-    const data=await api('/api/bootstrap');state.contacts=data.contacts;state.status=data.status;
-    if(state.selected&&!current()){state.selected=null;state.messages=[];state.fingerprint='';}
-    if(!state.selected&&state.contacts.length){state.selected=state.contacts[0].id;$('message-input').value=state.drafts.get(state.selected)||'';}
-    $('view-chat').classList.toggle('mobile-list',state.mobileList||!state.selected);
-    render();if(state.selected)await loadMessages(state.selected);
-    if(!state.stream)connectStream(data.cursor);
-  }catch(error){$('runtime-banner').hidden=false;$('runtime-detail').textContent=error.message;}
-  finally{state.syncing=false;if(state.syncAgain){state.syncAgain=false;scheduleSync();}}
+  // Callers saving settings must await the refresh requested after their write.
+  syncPromise=(async()=>{
+    try{
+      do{
+        state.syncAgain=false;
+        try {
+          const data=await api('/api/bootstrap');state.contacts=data.contacts;state.status=data.status;
+          if(state.selected&&!current()){state.selected=null;state.messages=[];state.fingerprint='';}
+          if(!state.selected&&state.contacts.length){state.selected=state.contacts[0].id;$('message-input').value=state.drafts.get(state.selected)||'';}
+          $('view-chat').classList.toggle('mobile-list',state.mobileList||!state.selected);
+          render();if(state.selected)await loadMessages(state.selected);
+          if(!state.stream)connectStream(data.cursor);
+        }catch(error){$('runtime-banner').hidden=false;$('runtime-detail').textContent=error.message;}
+      }while(state.syncAgain);
+    }finally{state.syncing=false;}
+  })();
+  return syncPromise;
 }
 function connectStream(cursor) {
   const stream=new EventSource(`/api/events?after=${cursor}`);state.stream=stream;
@@ -289,4 +302,5 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState===
 window.addEventListener('beforeunload',()=>state.stream?.close());
 setInterval(()=>{if(document.visibilityState==='visible')sync();},15000);
 initAI({api,escape,toast,state,current,patchContact,setView});
+initVoice({api,toast,current,patchContact});
 sync();

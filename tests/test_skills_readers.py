@@ -113,7 +113,8 @@ def test_skill_preview_api(tmp_path):
         assert r.status_code==200 and r.json()['name']=='demo'
         saved=c.post('/api/ai/config/skills',headers={'X-Panel-Request':'1'},json=r.json())
         assert saved.status_code==201
-        assert c.get('/api/ai/bootstrap').json()['skills'][0]['name']=='demo'
+        skills=c.get('/api/ai/bootstrap').json()['skills']
+        assert next(s for s in skills if s['id']==saved.json()['id'])['name']=='demo'
 
 
 def test_image_turn_is_latest_user_message_even_after_unanswered_history(tmp_path):

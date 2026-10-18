@@ -257,3 +257,28 @@ def test_delayed_weixin_login_automatically_connects_without_resume_click(monkey
     finally:
         commands.put(dict(op='stop'))
         thread.join(timeout=2)
+
+
+def test_main_window_transition_during_attach_retries_without_manual_resume(monkeypatch):
+    from wechat_panel.bridge import ConnectionLost
+    actions=[]
+    class Bridge:
+        def health(self):return dict(state='ready',account_id='self')
+        def attach(self,c,for_send=False):
+            actions.append('attach')
+            if len(actions)==1:raise ConnectionLost('暂未发现微信主窗口，正在自动重试')
+            return []
+        def snapshot(self,c):return []
+    monkeypatch.setattr(runtime,'WeixinBridge',Bridge)
+    commands,output=Queue(),Queue()
+    commands.put(dict(op='configure',contacts=[dict(id='friend',listening=True)],paused=False))
+    thread=Thread(target=runtime.worker_main,args=(commands,output,False),daemon=True)
+    thread.start()
+    try:
+        receive(output,lambda e:e['kind']=='listener' and e['state']=='reconnecting')
+        receive(output,lambda e:e['kind']=='listener' and e['state']=='listening')
+        assert actions==['attach','attach']
+    finally:
+        commands.put(dict(op='stop'))
+        thread.join(timeout=2)
+        assert not thread.is_alive()

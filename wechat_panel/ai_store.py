@@ -55,19 +55,28 @@ class AIStore:
                     status TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(run_id,call_id));
                 CREATE TABLE IF NOT EXISTS ai_inbox (
                     contact_id TEXT PRIMARY KEY, trigger_id INTEGER NOT NULL, due REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS hermes_confirmations (
+                    id TEXT PRIMARY KEY REFERENCES ai_approvals(id), run_id TEXT NOT NULL,
+                    contact_id TEXT NOT NULL, code TEXT NOT NULL UNIQUE, expires REAL NOT NULL,
+                    notice_id INTEGER NOT NULL DEFAULT 0, response_id INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'pending');
             ''')
             db.execute("INSERT OR IGNORE INTO settings VALUES('ai_settings',?)",(json.dumps(AISettings().model_dump()),))
             # Start at the current event: enabling AI never replays old messages.
             db.execute("INSERT OR IGNORE INTO settings VALUES('ai_cursor',?)",(str(store.latest_event()),))
             columns={r['name'] for r in db.execute('PRAGMA table_info(ai_runs)')}
-            for name,definition in {'schedule_id':"TEXT NOT NULL DEFAULT ''",'baseline_id':'INTEGER NOT NULL DEFAULT 0'}.items():
+            for name,definition in {'schedule_id':"TEXT NOT NULL DEFAULT ''",'baseline_id':'INTEGER NOT NULL DEFAULT 0',
+                                    'resume_message_id':'INTEGER NOT NULL DEFAULT 0'}.items():
                 if name not in columns:db.execute(f'ALTER TABLE ai_runs ADD COLUMN {name} {definition}')
-        if not self.list('styles'):
-            for name,description,prompt in [
-                ('简洁自然','像平时发微信一样，直接回应','使用自然中文，简洁友好，默认一至三句话。直接回应对方，不堆砌标题和列表。不知道的信息明确说明，不编造事实。'),
-                ('电商客服','商品咨询、售后与订单协助','你是电商客服助手。优先依据提供的商品与售后知识回答，语气耐心、清楚。不要编造价格、库存、物流和订单状态；需要实时信息时调用已授权工具。'),
-                ('财务助手','整理账目、核对数据与财务问答','你是财务工作助手。区分事实、计算与假设，金额标明币种和期间。计算使用工具，信息缺失时询问，不编造凭证、交易和报表数据。')]:
-                self.save('styles',None,dict(name=name,description=description,prompt=prompt))
+            columns={r['name'] for r in db.execute('PRAGMA table_info(hermes_confirmations)')}
+            for name,definition in {'panel_only':'INTEGER NOT NULL DEFAULT 0',
+                                    'delivery_retries':'INTEGER NOT NULL DEFAULT 0',
+                                    'retry_after':'REAL NOT NULL DEFAULT 0',
+                                    'summary':"TEXT NOT NULL DEFAULT ''",
+                                    'scope':"TEXT NOT NULL DEFAULT 'operation'"}.items():
+                if name not in columns:db.execute(f'ALTER TABLE hermes_confirmations ADD COLUMN {name} {definition}')
+            if 'decision_source' not in {r['name'] for r in db.execute('PRAGMA table_info(ai_approvals)')}:
+                db.execute("ALTER TABLE ai_approvals ADD COLUMN decision_source TEXT NOT NULL DEFAULT 'user'")
         builtins = [
             ('current_time','clock','读取当前日期时间',{}),
             ('calculate','calculator','计算四则运算表达式',{'expression':{'type':'string','maxLength':300}}),
@@ -80,9 +89,22 @@ class AIStore:
         from .skills import BUILTINS as SKILL_TOOLS
         BUILTINS=COMPANION_TOOLS+SKILL_TOOLS
         for name,description,properties,approval in BUILTINS:
+            if name in ('news_collect','generate_image'):
+                parameters={'type':'object','properties':properties,'required':['prompt'] if name=='generate_image' else [],'additionalProperties':False}
+                existing=next((t for t in self.list('tools') if t.get('builtin')==name),None)
+                if not existing:
+                    self.save('tools',None,dict(name=name,kind='builtin',builtin=name,description=description,
+                        approval=approval,parameters=parameters))
+                elif existing['parameters']!=parameters or existing['description']!=description:
+                    # Preserve enabled/approval/ID and existing Agent bindings.
+                    self.save('tools',existing['id'],{**{k:v for k,v in existing.items() if k not in ('id','key_configured')},
+                        'description':description,'parameters':parameters})
+                continue
             if not any(t.get('builtin')==name for t in self.list('tools')):
                 self.save('tools',None,dict(name=name,kind='builtin',builtin=name,description=description,
                     approval=approval,parameters={'type':'object','properties':properties,'required':list(properties),'additionalProperties':False}))
+        from .image_generation import install_defaults
+        install_defaults(self)
         for name,profile in [('高德地图 MCP','amap'),('TreeMind 树图（待接入）','treemind')]:
             if not any(c['profile']==profile for c in self.list('mcp')):
                 self.save('mcp',None,dict(name=name,profile=profile,auth='query' if profile=='amap' else 'bearer'))
@@ -95,6 +117,7 @@ class AIStore:
     def public(resource):
         result = {k:v for k,v in resource.items() if k not in ('secret','api_key')}
         if 'steps' in result:
+            result['style_id'] = ''
             from .companion_models import Companion
             result['companion']=Companion.model_validate(result.get('companion',{})).model_dump()
             result.setdefault('knowledge_mode','on_demand')
@@ -111,19 +134,23 @@ class AIStore:
                     db.execute('SELECT * FROM ai_resources WHERE kind=? ORDER BY created_at',(kind,))]
 
     def get(self, kind, rid, private=False):
+        if kind not in CONFIGS:raise KeyError('配置类型不存在')
         with self.store.connect() as db:
             row = db.execute('SELECT data FROM ai_resources WHERE kind=? AND id=?',(kind,rid)).fetchone()
         if not row: raise KeyError('AI 配置不存在')
         value=json.loads(row['data']) | {'id':rid}
+        if kind == 'agents':value['style_id'] = ''
         return value if private else self.public(value)
 
     def save(self, kind, rid, data):
         if kind not in CONFIGS: raise KeyError('配置类型不存在')
+        old=self.get(kind,rid,private=True) if rid else {}
+        if kind == 'agents' and old.get('vibe_engine') == 'sparkflow' and 'vibe_engine' not in data:
+            data = {**data, 'vibe_engine': 'sparkflow'}
         try: value=CONFIGS[kind].model_validate(data).model_dump()
         except ValidationError as exc:
             # Validation errors can contain the submitted secret; only return messages.
             raise ValueError('；'.join(e['msg'].replace('Value error, ','') for e in exc.errors(include_input=False))) from None
-        old=self.get(kind,rid,private=True) if rid else {}
         key=value.pop('api_key',None)
         clear=value.pop('clear_secret',False)
         if kind in ('providers','tools','agents','services','mcp'):
@@ -132,10 +159,11 @@ class AIStore:
             connection=self.get('mcp',value['connection_id'])
             value['capability']={'amap':'amap','treemind':'mindmap'}.get(connection['profile'],'general')
         if kind=='agents':
-            for resource, ids in [('providers',[value['provider_id']] if value['kind']=='workflow' else []),
-                    ('styles',[value['style_id']] if value['style_id'] else []),
+            for resource, ids in [('providers',[value['provider_id']] if value['provider_id'] else []),
                     ('knowledge',value['knowledge_ids']),('tools',value['tool_ids']),('skills',value['skill_ids'])]:
                 for item in ids: self.get(resource,item)
+            if value['kind']=='hermes' and value['hermes_contact_id']:
+                self.store.contact(value['hermes_contact_id'])
             c=value['companion']
             for sid,category in [(c['search_service_id'],'search'),(c['memory']['service_id'],'memory'),
                 (c['media']['tts_service_id'],'tts'),(c['media']['image_service_id'],'image'),(c['safety']['observability_service_id'],'observability')]:
@@ -167,7 +195,7 @@ class AIStore:
         if kind=='agents' and any(c.get('ai_agent_id')==rid for c in self.store.contacts()):
             raise ValueError('该 Agent 已绑定联系人，请先切换联系人 Agent')
         for agent in self.list('agents'):
-            linked={'providers':[agent['provider_id']],'styles':[agent['style_id']],
+            linked={'providers':[agent['provider_id']],
                     'knowledge':agent['knowledge_ids'],'tools':agent['tool_ids'],'skills':agent.get('skill_ids',[])}
             c=agent['companion']
             linked['services']=[c['search_service_id'],c['memory']['service_id'],c['media']['tts_service_id'],c['media']['image_service_id'],c['safety']['observability_service_id']]
@@ -220,10 +248,12 @@ class AIStore:
             return [dict(row) for row in rows]
 
     def detail(self,rid):
-        result=self.run(rid);result.pop('state')
+        result=self.run(rid);state=result.pop('state')
+        result['pdf'] = state.get('pdf')
+        result['approval_scope']=state['snapshot']['agent'].get('hermes_approval_scope','operation')
         with self.store.connect() as db:
             result['trace']=[dict(row)|{'detail':json.loads(row['detail'] if row['detail'].startswith(('{','[')) else unprotect(row['detail']))} for row in db.execute('SELECT * FROM ai_trace WHERE run_id=? ORDER BY id',(rid,))]
-            result['approvals']=[dict(row)|{'arguments':json.loads(row['arguments'])} for row in db.execute('SELECT * FROM ai_approvals WHERE run_id=? ORDER BY created_at',(rid,))]
+            result['approvals']=[dict(row)|{'arguments':json.loads(row['arguments'])} for row in db.execute('SELECT a.*,c.summary FROM ai_approvals a LEFT JOIN hermes_confirmations c ON c.id=a.id WHERE a.run_id=? ORDER BY a.created_at',(rid,))]
         return result
 
     def update_run(self,rid,**values):
@@ -242,7 +272,8 @@ class AIStore:
             db.execute("DELETE FROM ai_inbox WHERE contact_id=?",(cid,))
             db.execute("UPDATE ai_runs SET status='cancelled',error=?,updated_at=? WHERE contact_id=? AND status IN ('pending','running','waiting_approval','draft','queued')",(reason,now(),cid))
             db.execute("UPDATE ai_approvals SET status='cancelled' WHERE run_id IN (SELECT id FROM ai_runs WHERE contact_id=? AND status='cancelled')",(cid,))
-            db.execute("UPDATE messages SET status='cancelled',error=? WHERE contact_id=? AND origin='ai' AND status='queued'",(reason,cid))
+            db.execute("UPDATE messages SET status='cancelled',error=? WHERE contact_id=? AND origin IN ('ai','approval','ai_progress') AND status='queued'",(reason,cid))
+            db.execute("UPDATE hermes_confirmations SET status='cancelled' WHERE contact_id=? AND status='pending'",(cid,))
             self.store.event(db,'ai.run',cid,detail=reason)
 
     def cancel_all(self,reason):
@@ -252,6 +283,7 @@ class AIStore:
             db.execute("UPDATE ai_approvals SET status='cancelled' WHERE status='pending' AND run_id IN (SELECT id FROM ai_runs WHERE status='cancelled')")
 
     def valid(self,run):
+        if run['status'] in ('cancelled','failed'):return False
         if run['dry_run']:return run['status'] not in ('cancelled','failed')
         if run.get('schedule_id'):
             from .companion_scheduler import schedule_valid
@@ -260,10 +292,13 @@ class AIStore:
         except KeyError:return False
         settings=self.settings()
         with self.store.connect() as db:
-            latest=db.execute("SELECT MAX(id) FROM messages WHERE contact_id=? AND direction='incoming' AND historical=0 AND (kind='text' OR (kind='image' AND media_id!=''))",(contact['id'],)).fetchone()[0]
+            from .conversation_turn import latest_id
+            latest=latest_id(db,contact['id'],run['state']['snapshot']['agent'])
+            from .hermes_confirmations import pending_reply
+            current=(latest==(run.get('resume_message_id') or run['trigger_id']) or pending_reply(db,run,latest))
         return (not self.store.paused() and settings['enabled'] and contact['listening']
                 and contact['mode']==run['mode'] and contact['ai_agent_id']==run['agent_id']
-                and contact['ai_revision']==run['revision'] and latest==run['trigger_id'])
+                and contact['ai_revision']==run['revision'] and current)
 
     @staticmethod
     def encode_state(value):return protect(json.dumps(value,ensure_ascii=False))

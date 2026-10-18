@@ -7,7 +7,7 @@ import time
 import traceback
 import uuid
 
-from .bridge import DemoBridge, WeixinBridge, SendUncertain, WindowTransition, connection_error
+from .bridge import DemoBridge, WeixinBridge, SendUncertain, WindowTransition, DesktopBusy, connection_error
 from .store import Store, now
 
 
@@ -185,7 +185,23 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                         # Recheck after potentially slow window attachment. A
                         # manual takeover can arrive while the worker reconnects.
                         if not ai_current(command):continue
-                        result = {'source_key': bridge.send(contact, command['text'])}
+                        message = send_store.message(command['message_id']) if send_store else None
+                        if message and message['kind'] == 'file':
+                            from .financial_pdf import report_path
+                            path = report_path(send_store.path.parent, message['ai_run_id'])
+                            result = {'source_key': bridge.send_file(contact, path)}
+                        else:
+                            if send_store and command.get('message_id'):
+                                bridge.receipt_observer=lambda stage,baseline=None,count=0:send_store.send_receipt(command['message_id'],stage,baseline,count)
+                            try:
+                                if message and message['kind']=='image':
+                                    from .image_delivery import deliver
+                                    result=deliver(bridge,send_store,message,contact)
+                                elif message and message.get('origin')=='ai':
+                                    from .voice_reply import deliver
+                                    result=deliver(bridge,send_store,message,contact,demo=demo)
+                                else:result = {'source_key': bridge.send(contact, command['text'])}
+                            finally:bridge.receipt_observer=None
                         if contact['listening']:
                             blocked.discard(contact['id'])
                             attached.add(contact['id'])
@@ -201,13 +217,16 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                 emit('result', request_id=command['request_id'], result=result,
                      message_id=command.get('message_id'))
             except Exception as exc:
+                from .voice_reply import ReplySuperseded
                 target = contacts.get(command.get('contact_id'))
-                if (op == 'send' and target and not paused and not isinstance(exc, SendUncertain)
+                if (op == 'send' and target and not paused and not isinstance(exc, (SendUncertain,DesktopBusy))
                         and (connection_error(exc) or target['id'] not in attached)):
                     failed(target, exc)
                 detail = ('微信连接暂时不可用，正在自动恢复；本条消息未执行发送'
                           if connection_error(exc) else str(exc))
                 emit('result', request_id=command['request_id'], error=detail,
+                     deferred=isinstance(exc,DesktopBusy),
+                     cancelled=isinstance(exc,ReplySuperseded),
                      uncertain=isinstance(exc, SendUncertain), message_id=command.get('message_id'))
         stamp = time.monotonic()
         active = not paused and any(c['listening'] and cid not in blocked for cid,c in contacts.items())
@@ -231,7 +250,7 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                                 with send_store.connect() as db:
                                     cfg=db.execute("SELECT data FROM ai_resources WHERE kind='agents' AND id=?",(contact['ai_agent_id'],)).fetchone()
                                 media=json.loads(cfg[0]).get('companion',{}).get('media',{}) if cfg else {}
-                                contact['_read_images']=bool(media.get('understand_images') and media.get('vision_provider_id') and contact['mode'] in ('ai_auto','ai_assist'))
+                                contact['_read_images']=bool(((media.get('understand_images') and media.get('vision_provider_id')) or media.get('image_service_id')) and contact['mode'] in ('ai_auto','ai_assist'))
                             except Exception:contact['_read_images']=False
                         items = bridge.snapshot(contact)
                         emit('snapshot', contact_id=cid, items=items)
@@ -301,6 +320,7 @@ class Runtime:
                 self.pending_requests.pop(request_id, None)
 
     def _pump(self):
+        retry_due={};retry_attempts={}
         while not self.stopping.is_set():
             try:
                 event = self.output.get(timeout=0.2)
@@ -327,6 +347,14 @@ class Runtime:
                         message_id = event.get('message_id')
                         if message_id:
                             state = 'cancelled' if event.get('cancelled') else 'uncertain' if event.get('uncertain') else 'failed' if event.get('error') else 'confirmed'
+                            if event.get('deferred'):
+                                # No paste/click has happened. Keep waiting while
+                                # the user works, without failing after a minute.
+                                retry_attempts[message_id]=min(retry_attempts.get(message_id,0)+1,3)
+                                retry_due[message_id]=time.monotonic()+2**retry_attempts[message_id]
+                                state='queued'
+                            else:
+                                retry_due.pop(message_id,None);retry_attempts.pop(message_id,None)
                             self.store.set_message_state(message_id, state, event.get('error',''),
                                                          event.get('result',{}).get('source_key'))
                             self.inflight = None
@@ -350,7 +378,14 @@ class Runtime:
                 with self.lock:
                     if (not self.inflight and not self.store.paused()
                             and self.status['state'] in ('ready', 'hidden')):
-                        pending = self.store.pending()
+                        pending=[];seen_contacts=set()
+                        for message in self.store.pending():
+                            # Waiting for the first part must not let later parts
+                            # overtake it. Other contacts may continue normally.
+                            if message['contact_id'] in seen_contacts:continue
+                            seen_contacts.add(message['contact_id'])
+                            if (time.monotonic()>=retry_due.get(message['id'],0)
+                                    and not self.store.awaiting_receipt(message)):pending.append(message)
                         if pending:
                             message = pending[0]
                             if not self.store.ai_send_valid(message):

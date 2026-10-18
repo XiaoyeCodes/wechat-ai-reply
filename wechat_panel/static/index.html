@@ -7,9 +7,11 @@
   <title>微信工作台 · Relay</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23184e3f'/%3E%3Cpath d='M11 12h18v13H19l-7 5V12' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/assets/app.css">
-  <link rel="stylesheet" href="/assets/ai.css">
-  <script src="/assets/app.js" type="module"></script>
+  <link rel="stylesheet" href="/assets/voice-settings.css?v=1">
+  <link rel="stylesheet" href="/assets/ai.css?v=workspace-1">
+  <script src="/assets/app.js?v=voice-settings-3" type="module"></script>
 <link rel="stylesheet" href="/assets/companion.css">
+  <link rel="stylesheet" href="/assets/selects.css?v=1">
 </head>
 <body>
   <div class="app-shell">
@@ -22,6 +24,7 @@
         <button class="nav-item" data-view="agent" aria-label="Agent 接口"><span data-icon="panel"></span><span>接口</span></button>
       </nav>
       <div class="rail-bottom">
+        <button class="nav-item" id="ai-global-settings" aria-label="设置"><span data-icon="panel"></span><span>设置</span></button>
         <button class="nav-item" data-view="status" aria-label="运行状态"><span data-icon="activity"></span><span>状态</span></button>
         <div class="local-avatar" title="本机工作空间">本机</div>
       </div>
@@ -82,7 +85,21 @@
             <p class="inline-error" id="listener-error" hidden></p>
             <label class="field-label" for="conversation-mode">会话模式</label><select id="conversation-mode"><option value="manual">人工聊天</option><option value="listen_only">仅监听</option><option value="ai_assist">AI 辅助回复</option><option value="ai_auto">AI 自动回复</option></select>
             <p class="field-hint" id="ai-mode-hint">人工聊天可在工作台回复；仅监听保留消息，不发送回复。</p>
-            <div class="agent-placeholder"><span data-icon="spark"></span><h3>此联系人的 Agent</h3><label class="sr-only" for="contact-agent">选择联系人 Agent</label><select id="contact-agent"><option value="">尚未绑定 Agent</option></select><p id="contact-agent-hint">在 AI 中心配置电商、财务或你开发好的 Agent，再为每位联系人独立选择。</p><button class="text-button" id="ai-manage">管理 Agent<span data-icon="arrow"></span></button><button class="text-button" id="agent-details">事件接口说明</button></div>
+            <label class="field-label" for="reply-format">Agent 回复形式</label><select id="reply-format"><option value="text">文字回复</option><option value="voice">语音回复</option></select>
+            <p class="field-hint" id="reply-format-hint">仅对当前联系人生效。也可以在微信说“以后用语音回复”或“改回文字回复”。</p>
+            <section id="voice-studio" class="voice-studio" aria-label="声音与试听" hidden>
+              <div class="voice-studio-heading"><h3>声音与试听</h3><span>独立音色</span></div>
+              <label class="field-label" for="voice-preset">回复音色</label><select id="voice-preset" disabled><option value="windows-huihui">正在读取音色…</option></select>
+              <p id="voice-description" class="field-hint">为当前联系人选一种喜欢的声音。</p>
+              <div id="voice-model-row" hidden><label class="field-label" for="voice-model">MiniMax 合成模型</label><select id="voice-model"><option value="speech-2.8-turbo">Turbo · 更快、更省</option><option value="speech-2.8-hd">HD · 高清音质</option></select><p class="field-hint" id="voice-cost"></p></div>
+              <button id="minimax-open" class="button secondary voice-manage-button" type="button">MiniMax 设置与声音克隆</button>
+              <details class="voice-sample-edit"><summary>调整试听文本</summary><label class="sr-only" for="voice-sample">试听文本</label><textarea id="voice-sample" rows="3" maxlength="120"></textarea></details>
+              <button id="voice-preview" class="button secondary voice-preview-button" disabled><span data-icon="play"></span><span id="voice-preview-label">试听音色</span></button>
+              <audio id="voice-preview-audio" controls preload="none" hidden></audio>
+              <p id="voice-preview-status" class="field-hint" role="status" aria-live="polite">试听只在浏览器播放，不会发送到微信。</p>
+              <p id="voice-network-note" class="voice-network-note"></p>
+            </section>
+            <div class="agent-placeholder"><span data-icon="spark"></span><h3>此联系人的 Agent</h3><label class="sr-only" for="contact-agent">选择联系人 Agent</label><select id="contact-agent" disabled><option value="" disabled hidden>请选择 Agent</option></select><p id="contact-agent-hint">在 AI 中心配置电商、财务或你开发好的 Agent，再为每位联系人独立选择。</p><button class="text-button" id="ai-manage">管理 Agent<span data-icon="arrow"></span></button><button class="text-button" id="agent-details">事件接口说明</button></div>
             <button class="button secondary full-width" id="retry-listener"><span data-icon="refresh"></span>重新建立监听</button>
             <div class="demo-controls" id="demo-controls" hidden><label class="field-label" for="demo-message">模拟联系人发来消息</label><div class="demo-input"><input id="demo-message" placeholder="仅用于演示环境"><button class="icon-button" id="demo-inject" aria-label="注入演示消息"><span data-icon="send"></span></button></div></div>
           </div>
@@ -105,11 +122,12 @@
 }</pre><div class="agent-rule"><span data-icon="shield"></span><p>在 AI 中心配置工具执行策略：预设工具自动执行，其他工具在面板确认后执行。此只读事件接口不授予发送或执行任务的权限。</p></div></div></main>
 
       <main id="view-ai" class="page-view ai-center" hidden>
-        <div class="ai-hero"><div><span class="eyebrow">RELAY INTELLIGENCE / 01</span><h2>为每一段对话，安排合适的 Agent。</h2><p>把模型、风格、知识与工具组合起来。你的电商助手、财务助手和自建 Agent，在同一个工作空间协作。</p></div><div class="ai-power"><span id="ai-power-label">AI 回复已关闭</span><button class="switch" id="ai-enabled" role="switch" aria-checked="false" aria-label="启用 AI 回复"><span></span></button><small>仅作用于已选择 AI 模式的联系人</small></div></div>
+        <div class="ai-hero"><div><span class="eyebrow">RELAY INTELLIGENCE / 01</span><h2>为每一段对话，安排合适的 Agent。</h2><p>选择助手、启用所需能力，让每段对话各得其所。</p></div></div>
         <div class="ai-summary" id="ai-summary"></div>
-        <div class="ai-settings-bar"><span>模型与 Agent 可复用，会话上下文按联系人隔离。</span><button class="text-button" id="ai-settings-open">回复设置</button></div>
-        <div class="ai-tabs" id="ai-tabs" role="tablist" aria-label="AI 配置分类"><button role="tab" data-ai-tab="agents" aria-selected="true">Agent</button><button role="tab" data-ai-tab="providers" aria-selected="false">模型连接</button><button role="tab" data-ai-tab="styles" aria-selected="false">回复风格</button><button role="tab" data-ai-tab="knowledge" aria-selected="false">知识库</button><button role="tab" data-ai-tab="skills" aria-selected="false">Skill 技能</button><button role="tab" data-ai-tab="tools" aria-selected="false">工具</button><button role="tab" data-ai-tab="mcp" aria-selected="false">MCP 连接</button><button role="tab" data-ai-tab="services" aria-selected="false">能力连接</button><button role="tab" data-ai-tab="memory" aria-selected="false">记忆与档案</button><button role="tab" data-ai-tab="schedules" aria-selected="false">主动关怀</button><button role="tab" data-ai-tab="runs" aria-selected="false">运行记录</button></div>
-        <section class="ai-library" aria-label="AI 资源"><div class="ai-section-heading"><div><h3 id="ai-section-title">我的 Agent</h3><p id="ai-section-description"></p></div><div class="companion-heading-actions"><button class="button secondary" id="ai-companion-template">创建阿慧模板</button><button class="button primary" id="ai-create">新建 Agent</button></div></div><div id="ai-library"></div></section>
+        <div class="ai-settings-bar"><span>每位联系人都有独立的对话与记忆。</span><button class="text-button" id="ai-workspace-settings" aria-pressed="false">设置</button></div>
+        <div class="ai-tabs" id="ai-tabs" role="tablist" aria-label="AI 工作空间"><button role="tab" data-ai-section="agents" aria-selected="true">我的 Agent</button><button role="tab" data-ai-section="extensions" aria-selected="false" tabindex="-1">扩展中心</button><button role="tab" data-ai-section="resources" aria-selected="false" tabindex="-1">资料与记忆</button><button role="tab" data-ai-section="schedules" aria-selected="false" tabindex="-1">自动任务</button><button role="tab" data-ai-section="runs" aria-selected="false" tabindex="-1">运行记录</button></div>
+        <div class="ai-subtabs" id="ai-subtabs" role="tablist" aria-label="分类" hidden></div>
+        <section class="ai-library" aria-label="AI 资源"><div class="ai-section-heading"><div><h3 id="ai-section-title">我的 Agent</h3><p id="ai-section-description"></p></div><div class="companion-heading-actions"><button class="button primary" id="ai-create">新建 Agent</button></div></div><div id="ai-library"></div></section>
       </main>
       <footer class="workspace-footer"><span>RELAY <b>·</b> 让对话有序发生</span><span id="footer-state">本机工作空间</span></footer>
     </div>
@@ -119,7 +137,54 @@
 
   <dialog id="delete-dialog"><form id="delete-form"><div class="modal-heading"><h2>移除联系人</h2><button type="button" class="icon-button" data-close="delete-dialog" aria-label="关闭移除联系人"><span data-icon="close"></span></button></div><p class="modal-description" id="delete-description"></p><p class="field-hint">将停止监听并删除该联系人在工作台的本地聊天记录。</p><div class="modal-actions"><button type="button" class="button secondary" data-close="delete-dialog">取消</button><button type="submit" class="button danger">移除联系人</button></div></form></dialog>
   <div id="toast" class="toast" role="status" hidden></div>
-  <dialog id="ai-editor" class="ai-dialog"><form id="ai-editor-form"><div class="modal-heading"><div><span class="eyebrow">AI WORKSPACE</span><h2 id="ai-editor-title"></h2></div><button type="button" class="icon-button" id="ai-editor-close" aria-label="关闭 AI 编辑器">×</button></div><div id="ai-editor-fields"></div><p id="ai-editor-error" class="form-error" role="alert" hidden></p><div class="modal-actions"><button type="button" class="button secondary" id="ai-editor-cancel">取消</button><button class="button primary" type="submit" id="ai-save">保存配置</button></div></form></dialog>
+  <dialog id="minimax-dialog" class="voice-dialog" aria-labelledby="minimax-title">
+    <header class="voice-dialog-header"><div class="modal-heading"><div><span class="eyebrow">VOICE STUDIO</span><h2 id="minimax-title">声音设置</h2></div><button type="button" id="minimax-close" class="icon-button" aria-label="关闭 MiniMax 设置">×</button></div>
+    <p id="minimax-settings-context" class="modal-description">连接 MiniMax，选择或创建自己的声音。</p>
+    <div class="voice-tabs" role="tablist" aria-label="声音设置分区"><button id="minimax-tab-voices" type="button" role="tab" aria-controls="minimax-panel-voices" aria-selected="true">音色与试听</button><button id="minimax-tab-setup" type="button" role="tab" aria-controls="minimax-panel-setup" aria-selected="false" tabindex="-1">连接与声音克隆</button></div></header>
+    <div class="voice-dialog-body">
+    <div id="minimax-panel-voices" role="tabpanel" aria-labelledby="minimax-tab-voices">
+    <section id="minimax-my-voices-section" class="voice-config-section">
+      <div class="voice-section-title"><h3>我的专属音色</h3><span id="minimax-voice-count" class="voice-key-status">0</span></div>
+      <p id="minimax-voices-empty" class="field-hint voice-empty">还没有专属音色。在“连接与声音克隆”中上传录音，或同步账号已有音色。</p>
+      <div id="minimax-my-voices"></div>
+      <div id="minimax-preview-options" hidden>
+        <details class="voice-sample-edit"><summary>试听模型与文本</summary>
+          <label class="field-label" for="minimax-preview-model">合成模型</label><select id="minimax-preview-model"><option value="speech-2.8-turbo">Speech 2.8 Turbo</option><option value="speech-2.8-hd">Speech 2.8 HD</option></select><p class="field-hint">用于试听；保存设置后，也用于当前联系人的 MiniMax 语音回复。</p>
+          <label class="field-label" for="minimax-preview-text">专属音色试听文本</label><textarea id="minimax-preview-text" rows="2" maxlength="120"></textarea>
+        </details>
+        <p class="field-hint">试听按量计费；克隆音色首次正式合成可能收取 9.9 元激活费，以账户计费为准。</p>
+        <audio id="minimax-preview-audio" controls preload="none" hidden></audio>
+        <p id="minimax-preview-status" class="field-hint" role="status" aria-live="polite">试听只播放声音，不更改联系人的音色或发送微信。</p>
+      </div>
+    </section>
+    </div>
+    <div id="minimax-panel-setup" role="tabpanel" aria-labelledby="minimax-tab-setup" hidden>
+    <section class="voice-config-section">
+      <div class="voice-section-title"><span class="voice-step">01</span><h3>连接 MiniMax</h3><span id="minimax-key-status" class="voice-key-status">尚未配置</span></div>
+      <form id="minimax-key-form">
+        <label class="field-label" for="minimax-key">API Key</label>
+        <input id="minimax-key" type="password" autocomplete="new-password" maxlength="4096" placeholder="粘贴中国站 API Key；留空保留已保存的 Key">
+        <p class="field-hint">密钥使用 Windows 加密保存在本机，保存后不会显示原文。使用 MiniMax 中国站账户和余额。</p>
+        <div class="voice-config-actions"><button class="button secondary" type="button" id="minimax-refresh">检测连接并同步音色</button><button class="text-button" type="button" id="minimax-clear">清除 Key</button></div>
+      </form>
+      <p id="minimax-config-status" class="field-hint" role="status" aria-live="polite"></p>
+    </section>
+    <section class="voice-config-section">
+      <div class="voice-section-title"><span class="voice-step">02</span><h3>上传声音，创建音色</h3></div>
+      <form id="minimax-clone-form">
+        <label class="field-label" for="minimax-clone-name">音色名称</label><input id="minimax-clone-name" maxlength="60" value="阿慧 · 专属声音" required>
+        <label class="voice-upload" for="minimax-clone-file"><span class="voice-upload-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4m-4 4 4-4 4 4M5 15v4a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-4"/></svg></span><span class="voice-upload-copy"><strong id="minimax-file-name">添加参考录音</strong><span id="minimax-file-meta">WAV / MP3 / M4A · 10 秒–5 分钟 · 最大 20 MB</span></span><span id="minimax-file-action" class="voice-upload-action">选择文件</span><input id="minimax-clone-file" type="file" accept=".wav,.mp3,.m4a,audio/wav,audio/mpeg,audio/mp4" aria-label="选择参考录音" required></label>
+        <p class="field-hint">使用自己或已获授权的单人清晰录音，尽量没有背景音乐。只在点击创建后上传到 MiniMax，本机不留存原始样音。</p>
+        <audio id="minimax-source-audio" controls preload="metadata" hidden></audio>
+        <details class="voice-price-note"><summary>克隆与试听费用说明</summary><p>克隆音色首次正式合成时收取 9.9 元／音色。创建后不会自动用于联系人；随后在面板试听或微信回复中使用，会触发激活。合成另按字数计费：Turbo 2 元、HD 3.5 元／万计费字符，1 个汉字计 2 字符。价格以 MiniMax 账户为准。</p></details>
+        <button id="minimax-clone-submit" type="submit" class="button primary">上传并创建音色</button>
+      </form>
+      <p id="minimax-clone-status" class="field-hint" role="status" aria-live="polite">创建成功后，会显示在本窗口上方的“我的专属音色”。</p>
+    </section>
+    </div></div>
+    <footer class="voice-dialog-footer"><div class="voice-save-summary"><strong id="minimax-save-state" role="status" aria-live="polite">设置已保存</strong><span id="minimax-save-hint">保存连接、所选音色与合成模型。</span></div><div class="voice-footer-actions"><button id="minimax-done" type="button" class="button secondary">关闭</button><button id="minimax-save" type="button" class="button primary">保存设置</button></div></footer>
+  </dialog>
+  <dialog id="ai-editor" class="ai-dialog" aria-labelledby="ai-editor-title"><form id="ai-editor-form"><div class="modal-heading"><div><span class="eyebrow">AI WORKSPACE</span><h2 id="ai-editor-title"></h2></div><button type="button" class="icon-button" id="ai-editor-close" aria-label="关闭 AI 编辑器">×</button></div><div id="ai-editor-fields"></div><div class="ai-editor-footer"><p id="ai-editor-error" class="form-error" role="alert" hidden></p><div class="modal-actions"><button type="button" class="button secondary" id="ai-editor-cancel">取消</button><button class="button primary" type="submit" id="ai-save">保存配置</button></div></div></form></dialog>
   <dialog id="ai-run-dialog" class="ai-dialog"><div class="modal-heading"><div><span class="eyebrow">AGENT RUN</span><h2>运行详情</h2></div><button type="button" class="icon-button" id="ai-run-close" aria-label="关闭运行详情">×</button></div><div id="ai-run-detail"></div></dialog>
   <dialog id="ai-settings-dialog" class="ai-dialog"><form id="ai-settings-form"><div class="modal-heading"><h2>回复设置</h2><button type="button" class="icon-button" id="ai-settings-close" aria-label="关闭回复设置">×</button></div><label class="ai-field"><span>携带最近多少条消息</span><input id="ai-context" type="number" min="2" max="60" required></label><label class="ai-field"><span>连续消息合并等待（秒）</span><input id="ai-debounce" type="number" min="0.3" max="10" step="0.1" required></label><p class="field-hint">对方连续发来几条消息时，等待后合并处理。修改设置会取消尚未完成的旧回复。</p><div class="modal-actions"><button class="button primary">保存回复设置</button></div></form></dialog>
   <dialog id="ai-test-dialog" class="ai-dialog"><form id="ai-test-form"><div class="modal-heading"><div><span class="eyebrow">PLAYGROUND</span><h2>测试 Agent</h2></div><button type="button" class="icon-button" id="ai-test-close" aria-label="关闭 Agent 测试">×</button></div><p class="field-hint">在测试台检查回复和工具流程，不会发送微信消息。需要确认的工具仍会等待批准。</p><label class="field-label" for="ai-test-agent">选择 Agent</label><select id="ai-test-agent" required></select><label class="field-label" for="ai-test-text">测试消息</label><textarea id="ai-test-text" rows="4" required maxlength="5000" placeholder="例如：这款商品可以退货吗？"></textarea><div class="companion-test-options"><label class="ai-check"><input id="ai-test-adult" type="checkbox">测试用户已自我声明成年</label><label class="button secondary">上传测试图片<input type="file" id="ai-test-image" accept="image/png,image/jpeg,image/webp" hidden></label><button type="button" class="text-button" id="ai-test-clear-image">移除图片</button><button type="button" class="text-button" id="ai-test-new-session">开启新会话</button><small id="ai-test-image-hint"></small></div><div class="modal-actions"><button class="button primary" id="ai-test-submit">开始测试</button></div></form><div id="ai-test-result"></div></dialog>

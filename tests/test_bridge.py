@@ -6,7 +6,43 @@ import pytest
 
 from wechat_panel import bridge as module
 from PIL import Image, ImageDraw
-from wechat_panel.bridge import WeixinBridge, image_direction
+from wechat_panel.bridge import WeixinBridge, image_direction, clipped_text_direction
+
+
+def test_click_waits_for_restored_control_bounds_without_clicking_other_window(monkeypatch):
+    from pywinauto.win32structures import RECT
+    obj=WeixinBridge.__new__(WeixinBridge)
+    bounds=iter([RECT(100,100,200,200),RECT(300,300,400,400)])
+    control=SimpleNamespace(rectangle=lambda:next(bounds),top_level_parent=lambda:SimpleNamespace(handle=123))
+    clicks=[]
+    monkeypatch.setattr(win32gui,'WindowFromPoint',lambda p:123 if p==(350,350) else 456)
+    monkeypatch.setattr(win32gui,'GetAncestor',lambda h,flag:h)
+    monkeypatch.setattr(module.time,'sleep',lambda _:None)
+    monkeypatch.setattr(pyautogui,'click',lambda *p,**kw:clicks.append(p))
+    obj._click(control,{},'test')
+    assert clicks==[(350,350)]
+
+
+def test_click_never_clicks_persistent_covering_window(monkeypatch):
+    from pywinauto.win32structures import RECT
+    obj=WeixinBridge.__new__(WeixinBridge)
+    control=SimpleNamespace(rectangle=lambda:RECT(100,100,200,200),top_level_parent=lambda:SimpleNamespace(handle=123))
+    monkeypatch.setattr(win32gui,'WindowFromPoint',lambda p:456)
+    monkeypatch.setattr(win32gui,'GetAncestor',lambda h,flag:h)
+    monkeypatch.setattr(module.time,'sleep',lambda _:None)
+    monkeypatch.setattr(pyautogui,'click',lambda *a,**kw:pytest.fail('must not click an occluding app'))
+    with pytest.raises(module.BridgeError,match='遮挡'):
+        obj._click(control,{},'test')
+
+
+def test_send_baseline_counts_existing_bubbles_with_trimmed_edges():
+    obj = WeixinBridge.__new__(WeixinBridge)
+    obj.Lists = SimpleNamespace(FriendChatList={})
+    rows = [SimpleNamespace(class_name=lambda: 'mmui::ChatTextItemView', body=body)
+            for body in ['标题\r\n正文', '\n标题\n正文\n', '标题\n正文不同']]
+    window = SimpleNamespace(child_window=lambda **kw: SimpleNamespace(children=lambda: rows))
+    obj._direction = lambda row, *args: ('outgoing', row.body)
+    assert obj._visible_text_count(window, {}, '标题\n正文\n\n') == 2
 
 
 def test_normal_chat_direction_requires_one_avatar_and_opposite_clear_space():
@@ -35,6 +71,34 @@ def test_direction_ignores_avatar_pixels_outside_message_viewport(scale):
     # Header or composer pixels are not evidence for a clipped message.
     assert image_direction(image,bounds,scale,(0,y+1,image.width,image.height))=='unknown'
     assert image_direction(image,bounds,scale,(0,0,image.width,y+size-1))=='unknown'
+
+
+@pytest.mark.parametrize('scale',[1,1.25,1.75,2])
+def test_clipped_long_text_requires_green_right_bubble_and_clear_left(scale):
+    image=Image.new('RGB',(round(668*scale),round(420*scale)),'#fafafa')
+    box=lambda coords:tuple(round(v*scale) for v in coords)
+    bounds=box((0,-220,668,285));clip=box((0,80,668,300))
+    assert clipped_text_direction(image,bounds,scale,clip)=='unknown'
+    ImageDraw.Draw(image).rectangle(box((155,80,595,275)),fill=(157,242,159))
+    assert clipped_text_direction(image,bounds,scale,clip)=='outgoing'
+    # Insufficient visible area, and pixels in header/composer, are not proof.
+    assert clipped_text_direction(image,bounds,scale,box((0,260,668,300)))=='unknown'
+    assert clipped_text_direction(image,bounds,scale,box((0,300,668,420)))=='unknown'
+    assert clipped_text_direction(image.transpose(Image.Transpose.FLIP_LEFT_RIGHT),bounds,scale,clip)=='unknown'
+    ImageDraw.Draw(image).rectangle(box((70,80,95,275)),fill=(157,242,159))
+    assert clipped_text_direction(image,bounds,scale,clip)=='unknown'
+    assert clipped_text_direction(Image.new('RGB',image.size),bounds,scale,clip)=='unknown'
+
+
+def test_green_image_rows_do_not_use_text_direction_fallback(monkeypatch):
+    from pywinauto.win32structures import RECT
+    obj=WeixinBridge.__new__(WeixinBridge)
+    item=SimpleNamespace(window_text=lambda:'[图片]',element_info=SimpleNamespace(control_type='ListItem'),
+                         descendants=lambda:[],rectangle=lambda:RECT(0,-200,600,300),
+                         class_name=lambda:'mmui::ChatImageItemView')
+    monkeypatch.setattr(module,'image_direction',lambda *a:'unknown')
+    monkeypatch.setattr(module,'clipped_text_direction',lambda *a:pytest.fail('must not classify image pixels as text'))
+    assert obj._direction(item,None,{},(Image.new('RGB',(600,400)),(0,0),1))[0]=='unknown'
 
 
 def test_send_reuses_bound_window_without_search_or_profile_clicks(monkeypatch):
@@ -211,24 +275,42 @@ def test_verified_account_cache_is_reused_only_in_same_weixin_session(tmp_path):
         assert obj.account_id is None and obj.account_hint is None
 
 
-def test_tray_hidden_main_reuses_only_verified_native_window_in_same_process(tmp_path, monkeypatch):
+def test_tray_hidden_main_is_rediscovered_after_restart_without_trusting_old_cache(tmp_path, monkeypatch):
     import json
-    import psutil
-    import win32process
     obj = WeixinBridge.__new__(WeixinBridge)
     obj.account_path = tmp_path/'account.json'
     obj.account_path.write_text(json.dumps(dict(context=dict(main_handle=123, pid=456, started_at=100))))
-    context = dict(started_at=100)
-    monkeypatch.setattr(win32gui, 'IsWindow', lambda h: h == 123)
-    monkeypatch.setattr(win32process, 'GetWindowThreadProcessId', lambda h: (1,456))
-    monkeypatch.setattr(psutil, 'Process', lambda pid: SimpleNamespace(
-        name=lambda:'Weixin.exe', create_time=lambda:context['started_at']))
-    window = SimpleNamespace(handle=123)
-    obj.desktop = SimpleNamespace(windows=lambda **kw:[], window=lambda **kw:window)
+    current=[dict(handle=789,pid=987,started_at=200,kind='mmui::MainWindow')]
+    monkeypatch.setattr('wechat_panel.wechat_windows.discover_weixin_windows',lambda:current)
+    window = SimpleNamespace(handle=789)
+    def wrap(handle):
+        assert handle==789, 'Never use the old HWND from an earlier process'
+        return window
+    obj.desktop = SimpleNamespace(windows=lambda **kw:[], window=wrap)
     assert obj._main_window() is window
-    context['started_at'] = 200
-    with pytest.raises(module.BridgeError, match='主窗口'):
+    current.clear()
+    with pytest.raises(module.ConnectionLost, match='自动重试'):
         obj._main_window()
+
+
+def test_multiple_real_mains_are_distinguished_from_missing_main(monkeypatch):
+    obj=WeixinBridge.__new__(WeixinBridge)
+    windows=[dict(handle=h,pid=h,started_at=1,kind='mmui::MainWindow') for h in (1,2)]
+    monkeypatch.setattr('wechat_panel.wechat_windows.discover_weixin_windows',lambda:windows)
+    with pytest.raises(module.BridgeError,match='2 个微信主窗口') as exc:obj._main_window()
+    assert not module.connection_error(exc.value)
+
+
+def test_hidden_login_page_is_reported_as_logged_out_and_clears_bindings(monkeypatch):
+    obj=WeixinBridge.__new__(WeixinBridge)
+    obj.account_id=obj.account_hint=obj.account_name='old'
+    obj.windows,obj.profiles,obj.verified_contacts={'x':1},{'x':1},{'x'}
+    obj.Tools=SimpleNamespace(is_weixin_running=lambda:True)
+    obj._input_desktop=lambda:True
+    monkeypatch.setattr('wechat_panel.wechat_windows.discover_weixin_windows',lambda:[
+        dict(handle=1,pid=1,started_at=1,kind='mmui::LoginWindow')])
+    assert obj.health()['state']=='offline'
+    assert obj.account_id is None and not obj.windows and not obj.profiles and not obj.verified_contacts
 
 
 @pytest.mark.parametrize('same_process,account_changed', [(True,False),(False,False),(True,True)])
