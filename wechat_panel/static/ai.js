@@ -1,20 +1,24 @@
 import {artworkFor,artworkHTML,syncContactArtwork} from './agent-art.js?v=3';
 import {initMCP,mcpFields,bindMCPFields,readMCP,mcpCard,discoverMCP} from './mcp.js';
-import {initCompanion,setCompanionData,agentFields,bindAgentFields,readAgentFields,serviceFields,bindServiceFields,readService,renderExtraTab,sessionFor,scopeFor,serviceDrivers} from './companion.js?v=agent-schedules-1';
+import {initCompanion,setCompanionData,agentFields,bindAgentFields,readAgentFields,serviceFields,bindServiceFields,readService,renderExtraTab,sessionFor,scopeFor,serviceDrivers} from './companion.js?v=skill-check-1';
 import {skillFields,bindSkillFields,readSkill} from './skills.js';
 import {hermesFields,readHermes,bindHermes} from './hermes.js';
 import {vibeFields,readVibe} from './vibe.js?v=sparkflow-parity-2';
-import {sections,sectionFor,renderNavigation,bindTabKeys,organizeAgentEditor,agentCapabilityNames,mergeCompanion} from './ai-workspace.js?v=codex-images-1';
+import {sections,sectionFor,renderNavigation,bindTabKeys,organizeAgentEditor,agentCapabilityNames,mergeCompanion} from './ai-workspace.js?v=api-settings-1';
+import {isSettingsTab,modelPlatforms,renderAPISettings,providerGuide,bindProviderGuide} from './api-settings.js?v=1';
 const $=id=>document.getElementById(id);
 let ctx,data=null,runs=[],tab='agents',editing=null,steps=[],documents=[],detailRun=null,testRun=null,refreshing=null,refreshTimer;
 const editedDrafts=new Map();
 const lastTabs={};
+let ownerId='';
+let lastAITab='agents',lastSettingsTab='providers';
 let cleanupEditor=()=>{};
 const labels={mcp:'MCP 连接',agents:'Agent',providers:'模型连接',knowledge:'知识库',skills:'Skill 技能',tools:'工具',services:'能力连接',memory:'记忆与档案',schedules:'主动关怀',runs:'运行记录'};
 const descriptions={mcp:'连接高德与外部 MCP，发现真实工具后按 Agent 授权；没有配置的服务不会被调用。',agents:'同一个 Agent 可以分配给多位联系人，每段对话保持独立上下文。',providers:'填写自己的模型接口、API Key 和模型 ID，保存后测试连接。',knowledge:'导入文本或 Markdown，按 Agent 分配资料，回复时按内容检索。',tools:'预设查询可自动执行，其他调用先在面板确认。',runs:'查看生成过程、知识引用、工具确认和微信发送结果。'};
-Object.assign(labels,{skills:'技能',connectors:'连接器',tools:'工具与权限',providers:'模型管理',preferences:'回复设置',schedules:'自动任务',services:'服务连接'});
-Object.assign(descriptions,{connectors:'集中管理搜索、语音、绘图与外部服务；配置完成后，在 Agent 中选择使用。',preferences:'设置近期上下文与连续消息的处理方式。'});
+Object.assign(labels,{skills:'Skills',mcp:'MCP',tools:'工具与权限',providers:'模型连接',preferences:'回复设置',schedules:'自动任务',services:'服务配置'});
+Object.assign(descriptions,{preferences:'设置近期上下文与连续消息的处理方式。'});
 Object.assign(descriptions,{skills:'导入标准技能包，按 Agent 绑定，按任务调用已有工具完成步骤。',services:'连接记忆、搜索、语音、图像与观测服务，填入自己的地址和密钥后测试。',memory:'按 Agent 与用户查看事实、摘要、情绪及关怀授权。',schedules:'安排 Agent 定时执行任务并分享结果，也可以管理联系人的关怀日程。'});
+Object.assign(descriptions,{agents:'先编辑角色与能力，再管理它自己的记忆和自动任务；在联系人中选择由谁回复。',providers:'共享资源 · 模型接口配置一次，可供多个 Agent 选用。',skills:'共享资源 · 已安装的 Skills 直接显示在这里；在各 Agent 的「工具与技能」中选择使用。',mcp:'共享资源 · 已添加的 MCP 直接显示在这里；发现并导入工具后，由各 Agent 授权使用。',services:'共享资源 · 搜索、图像、音频等服务的账号与接口配置；各 Agent 选择使用。HTTP 服务与 MCP 分开管理。',knowledge:'共享资源 · 统一维护资料，在各 Agent 的「知识与记忆」中选择需要的知识库。',memory:'仅管理此 Agent 的记忆与档案；不同联系人、测试会话分别保存。',schedules:'仅管理此 Agent 的定时任务与联系人关怀，执行时沿用它的模型、Skills 和工具权限。'});
 const statuses={pending:'等待处理',running:'正在处理',waiting_approval:'等待工具确认',draft:'回复待确认',queued:'等待微信发送',sent:'微信已核对',completed:'已完成',failed:'处理失败',cancelled:'已取消',uncertain:'结果待核对'};
 const stepNames={knowledge:'检索知识库',model:'模型处理',tool:'固定工具调用',reply:'输出回复'};
 const esc=x=>ctx.escape(x);
@@ -31,13 +35,20 @@ export function initAI(context){
   ctx=context;
   initMCP(context,refreshAI);
   initCompanion({...context,refresh:refreshAI,openRun});
-  const navigate=next=>{tab=next;lastTabs[sectionFor(tab)]=tab;renderLibrary();};
+  const navigate=next=>{ownerId='';tab=next;lastTabs[sectionFor(tab)]=tab;renderLibrary();};
+  $('ai-agent-context').onclick=e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.agentBack!==undefined)navigate('agents');else if(b.dataset.agentPage){tab=b.dataset.agentPage;renderLibrary();}else if(b.dataset.ownerEdit)openEditor('agents',ownerId).catch(e=>ctx.toast(e.message,true));};
+  bindTabKeys($('ai-agent-context'));
   $('ai-tabs').onclick=e=>{const b=e.target.closest('[data-ai-section]');if(b)navigate(lastTabs[b.dataset.aiSection]||sections[b.dataset.aiSection].tabs[0]);};
   $('ai-subtabs').onclick=e=>{const b=e.target.closest('[data-ai-tab]');if(b)navigate(b.dataset.aiTab);};
-  bindTabKeys($('ai-tabs'));bindTabKeys($('ai-subtabs'));
-  $('ai-workspace-settings').onclick=()=>navigate('providers');
-  $('ai-global-settings').onclick=()=>{ctx.setView('ai');navigate('providers');};
-  $('ai-create').onclick=async()=>{try{await refreshAI();if(tab==='connectors')openConnectorPicker();else await openEditor(tab);}catch(e){ctx.toast(e.message,true);}};
+  bindTabKeys($('ai-tabs'));bindTabKeys($('ai-subtabs'));bindTabKeys($('settings-tabs'));
+  $('settings-tabs').onclick=e=>{const b=e.target.closest('[data-ai-tab]');if(b)navigate(b.dataset.aiTab);};
+  $('ai-workspace-settings').onclick=()=>{ctx.setView('settings');navigate('providers');};
+  $('api-platforms').onclick=async e=>{
+    const b=e.target.closest('[data-add-platform]');if(!b)return;
+    const platform=modelPlatforms.find(p=>p.id===b.dataset.addPlatform);
+    try{await openEditor('providers',null,platform?{name:platform.name,base_url:platform.base_url}:{});}catch(error){ctx.toast(error.message,true);}
+  };
+  $('ai-create').onclick=async()=>{try{await refreshAI();await openEditor(tab);}catch(e){ctx.toast(e.message,true);}};
   $('ai-settings-close').onclick=()=>$('ai-settings-dialog').close();
   $('ai-settings-form').onsubmit=async e=>{e.preventDefault();try{await ctx.api('/api/ai/settings',{method:'PUT',body:{...data.settings,context_messages:Number($('ai-context').value),debounce_seconds:Number($('ai-debounce').value)}});$('ai-settings-dialog').close();await refreshAI();ctx.toast('AI 回复设置已保存');}catch(error){ctx.toast(error.message,true);}};
   $('ai-manage').onclick=()=>ctx.setView('ai');
@@ -64,7 +75,16 @@ export function initAI(context){
   for(const id of ['ai-run-detail','ai-test-result','ai-conversation'])$(id).onclick=runAction;
   $('ai-run-detail').oninput=e=>{const id=$('ai-run-detail').dataset.runId;if(e.target.id==='ai-draft-text'&&id)editedDrafts.set(id,e.target.value);};
   refreshAI().catch(e=>ctx.toast(e.message,true));
-  setInterval(()=>{if(document.visibilityState==='visible'&&(ctx.state.view==='ai'||detailRun||testRun||ctx.current()?.mode.startsWith('ai_')))refreshAI().catch(()=>{});},2000);
+  setInterval(()=>{if(document.visibilityState==='visible'&&(['ai','settings'].includes(ctx.state.view)||detailRun||testRun||ctx.current()?.mode.startsWith('ai_')))refreshAI().catch(()=>{});},2000);
+}
+
+export function activateAIView(view){
+  if(view==='settings'&&!isSettingsTab(tab)){
+    lastAITab=ownerId?'agents':tab;ownerId='';tab=lastSettingsTab;
+  }else if(view==='ai'&&isSettingsTab(tab)){
+    lastSettingsTab=tab;tab=lastAITab;ownerId='';
+  }
+  renderLibrary();
 }
 
 export function scheduleAIRefresh(){clearTimeout(refreshTimer);refreshTimer=setTimeout(()=>refreshAI().catch(()=>{}),250);}
@@ -86,11 +106,20 @@ export async function refreshAI(fresh=false){
 
 function renderLibrary(){
   if(!data)return;
+  const host=$(isSettingsTab(tab)?'settings-resource-host':'ai-resource-host'),panel=$('ai-resource-panel');
+  if(panel.parentElement!==host)host.append(panel);
+  renderAPISettings(tab,data,esc);
+  const owner=find('agents',ownerId);
+  if(ownerId&&!owner){ownerId='';tab='agents';}
+  $('view-ai').classList.toggle('ai-agent-detail',!!ownerId);
   renderNavigation(tab,labels);
-  $('ai-section-title').textContent=tab==='agents'?'我的 Agent':labels[tab];
+  const context=$('ai-agent-context');context.hidden=!ownerId;
+  const contextHTML=ownerId?`<div class="ai-agent-context-heading"><button type="button" class="text-button" data-agent-back>← 我的 Agent</button><strong>${esc(owner.name)}</strong><span class="pill">此 Agent 独立配置</span><button type="button" class="text-button" data-owner-edit="${esc(owner.id)}">编辑 Agent</button></div><div class="ai-subtabs" role="tablist" aria-label="此 Agent 的配置">${['memory','schedules'].map(key=>`<button type="button" role="tab" data-agent-page="${key}" aria-selected="${tab===key}" tabindex="${tab===key?0:-1}">${labels[key]}</button>`).join('')}</div>`:'';
+  if(context.innerHTML!==contextHTML)context.innerHTML=contextHTML;
+  $('ai-section-title').textContent=tab==='agents'?'我的 Agent':tab==='providers'?'已配置的模型':labels[tab];
   $('ai-section-description').textContent=descriptions[tab];
-  $('ai-create').hidden=['runs','memory','schedules','preferences'].includes(tab);$('ai-create').textContent=tab==='connectors'?'添加连接器':tab==='skills'?'添加技能':'新建'+labels[tab];
-  if(renderExtraTab(tab))return;
+  $('ai-create').hidden=['runs','memory','schedules','preferences'].includes(tab);$('ai-create').textContent=tab==='skills'?'添加 Skill':tab==='mcp'?'添加 MCP':tab==='services'?'添加服务':'新建'+labels[tab];
+  if(renderExtraTab(tab,ownerId))return;
   $('ai-library').onclick=libraryAction;
   if(tab==='preferences'){
     $('ai-library').className='ai-card-grid';
@@ -98,7 +127,7 @@ function renderLibrary(){
     $('ai-settings-open').onclick=()=>{$('ai-context').value=data.settings.context_messages;$('ai-debounce').value=data.settings.debounce_seconds;$('ai-settings-dialog').showModal();};
     return;
   }
-  const rows=tab==='runs'?runs:tab==='connectors'?[...data.services.map(r=>({...r,_kind:'services'})),...data.mcp.map(r=>({...r,_kind:'mcp'}))]:data[tab];
+  const rows=tab==='runs'?runs:data[tab];
   $('ai-library').className=tab==='runs'?'ai-run-list':'ai-card-grid';
   if(!rows.length){$('ai-library').innerHTML=`<div class="ai-empty"><span class="ai-empty-mark">✦</span><h4>${tab==='runs'?'每次处理，都会留下记录':tab==='agents'?'让第一位 Agent 开始工作':'还没有'+labels[tab]}</h4><p>${tab==='agents'?'先添加模型连接，再配置系统提示词、知识库与工具。也可以直接接入你已开发好的 HTTP Agent。':tab==='runs'?'在 Agent 卡片中开始测试，或为联系人启用 AI 模式。':'通过右上角按钮添加'+labels[tab]+'。'}</p></div>`;return;}
   const libraryTab=tab;
@@ -128,16 +157,16 @@ function renderLibrary(){
       tag='MODEL CONNECTION';body=`<p class="ai-model-name">${esc(r.model)}</p><p class="ai-muted-url">${esc(r.base_url)}</p>`;foot=`<span>${r.key_configured?'密钥已加密保存':'未配置密钥 / 本地模型'}</span>`;
 
     }else if(tab==='knowledge'){
-      tag='KNOWLEDGE';body=`<p>${esc(r.description||'供 Agent 检索的专属资料')}</p><div class="ai-doc-count"><strong>${r.documents.length}</strong><span>份资料</span></div>`;foot=`<span>${r.documents.map(d=>d.title).slice(0,3).map(esc).join(' · ')||'等待添加资料'}</span>`;
+      tag='KNOWLEDGE';body=`<p>${esc(r.description||'可供多个 Agent 选用的共享资料')}</p><div class="ai-doc-count"><strong>${r.documents.length}</strong><span>份资料</span></div>`;foot=`<span>${r.documents.map(d=>d.title).slice(0,3).map(esc).join(' · ')||'等待添加资料'}</span>`;
     }else if(tab==='skills'){
-      tag='SKILL PACKAGE';body=`<p>${esc(r.description)}</p><p>${r.files.length} 份参考文件 · ${r.enabled?'已启用':'已停用'}</p>`;foot='<span>在 Agent 中绑定后按需使用</span>';
+      tag='SKILL PACKAGE';body=`<p>${esc(r.description)}</p><p>${r.files.length} 份参考文件 · ${r.enabled?'已启用':'已停用'}</p>`;foot=`<span>${data.agents.filter(a=>(a.skill_ids||[]).includes(r.id)).length} 个 Agent 已选用 · 共享 Skill</span>`;
     }else if(tab==='services'){
       tag='服务连接';body=`<p>${esc(Object.values(serviceDrivers).flat().find(x=>x[0]===r.driver)?.[1]||r.driver)}</p><p class="ai-muted-url">${esc(r.url||(r.driver==='codex_image'?'使用本机 Codex / ChatGPT 登录':'使用本机 Agent Reach'))}</p>`;foot=`<span>${r.enabled?'已配置 · 未实时检测':'已停用'} · ${r.driver==='codex_image'?'账号授权 · 无需 API Key':r.key_configured?'密钥已加密':'未配置密钥'}</span>`;
     }else{
       tag=r.kind==='mcp'?'MCP TOOL':r.kind==='builtin'?'BUILT-IN TOOL':'HTTP TOOL';body=`<p>${esc(r.description)}</p><span class="pill ${r.approval==='confirm'?'amber':'green'}">${r.approval==='confirm'?'执行前确认':'允许自动执行'}</span>`;foot=`<span>${r.enabled?'已启用':'已停用'}</span>`;
     }
     const art=tab==='agents'?artworkFor(r):null;
-    return `<article data-resource-kind="${tab}" class="ai-resource-card${art?' ai-agent-card has-agent-art':''}"${art?` data-agent-art="${art.key}"`:''}>${artworkHTML(art)}<div class="ai-card-kicker"><span>${tag}</span><button class="icon-button" data-edit="${esc(r.id)}" aria-label="编辑 ${esc(r.name)}">↗</button></div><h4>${esc(r.name)}</h4>${body}<div class="ai-card-footer">${foot}<div>${tab==='agents'?`<button class="text-button" data-test="${esc(r.id)}">测试 Agent</button>`:tab==='providers'?`<button class="text-button" data-provider-test="${esc(r.id)}">测试连接</button>`:tab==='services'?`<button class="text-button" data-service-test="${esc(r.id)}">测试能力</button>`:''}<button class="text-button" data-edit="${esc(r.id)}">编辑</button><button class="text-button ai-delete" data-delete="${esc(r.id)}">删除</button></div></div></article>`;
+    return `<article data-resource-kind="${tab}" class="ai-resource-card${art?' ai-agent-card has-agent-art':''}"${art?` data-agent-art="${art.key}"`:''}>${artworkHTML(art)}<div class="ai-card-kicker"><span>${tag}</span><button class="icon-button" data-edit="${esc(r.id)}" aria-label="编辑 ${esc(r.name)}">↗</button></div><h4>${esc(r.name)}</h4>${body}<div class="ai-card-footer">${foot}<div>${tab==='agents'?`<button class="text-button" data-agent-memory="${esc(r.id)}">记忆与档案</button><button class="text-button" data-agent-schedules="${esc(r.id)}">自动任务</button><button class="text-button" data-test="${esc(r.id)}">测试 Agent</button>`:tab==='providers'?`<button class="text-button" data-provider-test="${esc(r.id)}">测试连接</button>`:tab==='services'?`<button class="text-button" data-service-test="${esc(r.id)}">测试能力</button>`:''}<button class="text-button" data-edit="${esc(r.id)}">编辑</button><button class="text-button ai-delete" data-delete="${esc(r.id)}">删除</button></div></div></article>`;
   }).join('');
 }
 
@@ -145,6 +174,7 @@ async function libraryAction(e){
   const b=e.target.closest('button');if(!b)return;
   const kind=b.closest('[data-resource-kind]')?.dataset.resourceKind||tab;
   try{
+    if(b.dataset.agentMemory||b.dataset.agentSchedules){ownerId=b.dataset.agentMemory||b.dataset.agentSchedules;tab=b.dataset.agentMemory?'memory':'schedules';renderLibrary();return;}
     if(b.dataset.mcpDiscover)await discoverMCP(b.dataset.mcpDiscover);
     if(b.dataset.hermesTest){b.disabled=true;await ctx.api(`/api/ai/agents/${b.dataset.hermesTest}/hermes-test`,{method:'POST'});ctx.toast('Hermes 引擎已连接，支持任务、审批和取消');}
     if(b.dataset.vibeTest){b.disabled=true;const result=await ctx.api(`/api/ai/agents/${b.dataset.vibeTest}/vibe-test`,{method:'POST'});ctx.toast(`Vibe-Trading ${result.revision.slice(0,12)}：${result.tools.filter(n=>n!=='load_skill').length} 项可用研究工具、${result.skills.length} 项技能${result.unavailable.length?'；暂不可用：'+result.unavailable.join('、'):''}`);}
@@ -191,31 +221,14 @@ export function renderContactAI(){
   if(run)box.innerHTML=`<div class="ai-reply-notice"><div><strong>${esc(find('agents',run.agent_id)?.name||'Agent')} · ${esc(statuses[run.status])}</strong><p>${esc(run.error||run.reply?.slice(0,130)||'回复和任务进度会在这里显示')}</p></div><button class="button secondary" data-run="${esc(run.id)}">${run.status==='draft'?'编辑并发送':run.status==='waiting_approval'?'确认工具':'查看详情'}</button></div>`;
 }
 
-function openConnectorPicker(){
-  let dialog=$('ai-connector-picker');
-  if(!dialog){
-    dialog=document.createElement('dialog');dialog.id='ai-connector-picker';dialog.className='modal ai-dialog';
-    const choices=[['search','联网搜索','Exa、Tavily 等搜索服务'],['tts','语音合成','固定音色与语音输出'],['image','图像生成','文字生图与图像网关'],['memory','外部记忆','Qdrant、Mem0 或记忆网关'],['observability','运行观测','Langfuse 等外部记录服务'],['mcp','其他连接器','通过 MCP 接入外部服务']];
-    dialog.innerHTML='<div class="modal-heading"><div><p class="eyebrow">连接外部服务</p><h2>添加连接器</h2></div><button type="button" class="icon-button" data-picker-close aria-label="关闭添加连接器">×</button></div><p class="field-hint">选择用途，再填写服务商提供的连接信息。</p><div class="ai-connector-choices">'+choices.map(([key,title,hint])=>`<button type="button" data-connector-type="${key}"><strong>${title}</strong><span>${hint}</span></button>`).join('')+'</div>';
-    document.body.append(dialog);
-    dialog.onclick=async event=>{
-      if(event.target.closest('[data-picker-close]'))dialog.close();
-      const button=event.target.closest('[data-connector-type]');if(!button)return;
-      const type=button.dataset.connectorType;dialog.close();
-      try{await openEditor(type==='mcp'?'mcp':'services',null,type==='mcp'?{}:{category:type,driver:serviceDrivers[type][0][0]});}catch(error){ctx.toast(error.message,true);}
-    };
-  }
-  dialog.showModal();
-}
-
 async function openEditor(kind,id=null,preset={}){
   cleanupEditor();cleanupEditor=()=>{};
   await refreshAI(true);
   const r=id?await ctx.api(`/api/ai/config/${kind}/${id}`):preset;
   editing={kind,id,resource:r};steps=structuredClone(r.steps||[{type:'knowledge',instruction:'',tool_id:'',arguments:{}},{type:'model',instruction:'',tool_id:'',arguments:{}},{type:'reply',instruction:'',tool_id:'',arguments:{}}]);documents=structuredClone(r.documents||[]);
   $('ai-editor-title').textContent=(id?'编辑':'新建')+labels[kind];$('ai-editor-error').hidden=true;
-  let html=input('name',kind==='tools'?'工具名称（英文标识）':'名称',r.name||'','required maxlength="80"');
-  if(kind==='providers')html+=`<div class="ai-form-grid">${input('base_url','接口地址（Base URL）',r.base_url||'https://api.openai.com/v1','required type="url"')}${input('model','模型 ID',r.model||'','required list="ai-model-options"')}<datalist id="ai-model-options"></datalist></div>${keyField(r)}<p class="field-hint">支持 Chat Completions 兼容接口，包括你自己的本地模型服务。API Key 不会回显到浏览器。</p><div class="ai-form-grid">${input('max_tokens','最大回复 Token',r.max_tokens||1000,'type="number" min="64" max="8000"')}${input('timeout','请求超时（秒）',r.timeout||45,'type="number" min="5" max="120"')}${input('temperature','温度（可留空，采用模型默认值）',r.temperature??'','type="number" min="0" max="2" step="0.1"')}</div>${id?'<button type="button" class="button secondary" id="ai-load-models">读取可用模型</button>':''}`;
+  let html=(kind==='providers'?providerGuide(r,!id,esc):'')+input('name',kind==='tools'?'工具名称（英文标识）':'名称',r.name||'','required maxlength="80"');
+  if(kind==='providers')html+=`<div class="ai-form-grid">${input('base_url','接口地址（Base URL）',r.base_url||'','required type="url"')}${input('model','模型 ID',r.model||'','required list="ai-model-options"')}<datalist id="ai-model-options"></datalist></div>${keyField(r)}<p class="field-hint">支持 Chat Completions 兼容接口，包括你自己的本地模型服务。API Key 不会回显到浏览器。</p><div class="ai-form-grid">${input('max_tokens','最大回复 Token',r.max_tokens||1000,'type="number" min="64" max="8000"')}${input('timeout','请求超时（秒）',r.timeout||45,'type="number" min="5" max="120"')}${input('temperature','温度（可留空，采用模型默认值）',r.temperature??'','type="number" min="0" max="2" step="0.1"')}</div>${id?'<button type="button" class="button secondary" id="ai-load-models">读取可用模型</button>':''}`;
   if(kind==='providers')html+=select('thinking','DeepSeek 推理模式',choose([['disabled','关闭推理（适合即时聊天）'],['enabled','开启推理（需要更高 Token 上限）'],['default','使用服务默认值']],r.thinking||'disabled'))+'<p class="field-hint">仅 DeepSeek 官方接口使用此参数。记忆抽取和图片描述使用简短的非推理请求。</p>';
   if(kind==='mcp')html+=mcpFields(r,{input,select,choose,keyField});
   if(kind==='services')html+=serviceFields(r);
@@ -224,11 +237,12 @@ async function openEditor(kind,id=null,preset={}){
   if(kind==='tools'&&r.kind!=='mcp')html+=input('description','工具功能说明',r.description||'','required')+`<div class="ai-form-grid">${select('kind','工具类型',choose([['http','HTTP 工具'],['builtin','内置工具']],r.kind||'http'))}${select('approval','执行策略',choose([['confirm','执行前在面板确认'],['auto','预设工具，允许自动执行']],r.approval||'confirm'))}</div><div id="ai-http-tool">${select('capability','工具用途',choose([['general','通用工具'],['mindmap','TreeMind / 思维导图（明确请求时调用）']],r.capability||'general'))}${input('url','工具接口地址',r.url||'','type="url"')}${select('method','HTTP 方法',choose([['POST','POST / JSON 参数'],['GET','GET / 查询参数']],r.method||'POST'))}${keyField(r)}<div class="ai-form-grid">${input('auth_header','密钥 Header 名称',r.auth_header||'Authorization')}${input('auth_scheme','密钥前缀（可留空）',r.auth_scheme??'Bearer')}</div></div><div id="ai-builtin-tool">${select('builtin','内置工具',choose([...new Map(data.tools.filter(t=>t.kind==='builtin').map(t=>[t.builtin,[t.builtin,t.description]])).values()],r.builtin||'clock'))}</div>${area('parameters','输入参数 JSON Schema',JSON.stringify(r.parameters||{type:'object',properties:{query:{type:'string'}},required:['query'],additionalProperties:false},null,2),7)}<label class="ai-check"><input type="checkbox" name="enabled" ${r.enabled!==false?'checked':''}>启用工具</label>`;
   if(kind==='tools'&&r.capability==='mindmap'&&r.kind==='http')html+='<p class="field-hint">此工具尚需 TreeMind 官方 API 地址与参数说明。请按官方文档填写输入参数 JSON Schema 和认证；不要直接使用官网首页作为 API 地址。保存有效配置并启用后，可在 Agent 中绑定。成功响应需要包含可打开的导图链接。</p>';
   if(kind==='tools'&&r.kind==='mcp')html+=input('description','工具功能说明',r.description,'required')+select('approval','执行策略',choose([['confirm','执行前在面板确认'],['auto','预设工具，允许自动执行']],r.approval))+`<p class="field-hint">远程工具：${esc(r.remote_name)} · ${esc(find('mcp',r.connection_id)?.name||'连接未找到')}。参数来自服务端，请在 MCP 连接重新导入以更新。</p><pre>${esc(JSON.stringify(r.parameters,null,2))}</pre><label class="ai-check"><input type="checkbox" name="enabled" ${r.enabled?'checked':''}>启用工具</label>`;
-  if(kind==='agents')html+=input('description','Agent 职责',r.description||'')+`<input type="hidden" name="kind" value="${esc(r.kind||'workflow')}">`+`<div id="ai-workflow-fields"><div class="ai-form-grid">${select('provider_id','模型连接',options('providers',r.provider_id))}</div>${area('prompt','系统提示词 · 此 Agent 的职责与规则',r.prompt||'',4)}${input('temperature','回复温度（留空沿用模型连接）',r.temperature??'','type="number" min="0" max="2" step="0.05"')}<p class="field-hint">陪伴聊天可设为 0.9–1.0。只影响此 Agent 的回复，不改变共享模型或记忆分析。系统提示词支持 {{user_name}}、{{current_time}}、{{weather}}；每日首次回复更新心情和天气缓存，时间实时注入，未知资料不编造。</p><label class="field-label">绑定知识库</label>${checks('knowledge',r.knowledge_ids||[])}${select('knowledge_mode','知识检索方式',choose([['on_demand','按需检索（推荐）'],['always','每轮检索'],['off','不检索']],r.knowledge_mode||'on_demand'))}<label class="field-label">绑定 Skill 技能</label>${checks('skills',r.skill_ids||[])}<label class="field-label">允许调用的工具</label>${checks('tools',r.tool_ids||[])}${select('web_policy','联网检索策略',choose([['auto','自动查证（推荐）'],['model','由模型决定'],['off','关闭联网检索']],r.web_policy||'auto'))}<p class="field-hint">自动查证：近期事实与不确定的问题先查询，闲聊不搜索；仅调用已授权工具，仍遵守工具确认设置。</p>${select('source_policy','参考链接展示',choose([['auto','智能展示：长内容摘要或主动索要时'],['requested','仅在用户索要时'],['always','每次查询后附来源']],r.source_policy||'auto'))}<p class="field-hint">查询来源始终保留在运行记录。普通短问答默认不附链接，地图、音乐或生成文件的链接正常提供。</p>${input('max_tool_rounds','最多工具调用轮数',r.max_tool_rounds||4,'type="number" min="1" max="10"')}<div class="ai-workflow-heading"><h3>处理流程</h3><button class="button secondary" id="ai-add-step" type="button">添加步骤</button></div><p class="field-hint">按顺序执行。模型可自主调用「能力与技能」中已授权的工具；固定工具参数支持 {{message}} 和 {{previous}}。</p><div id="ai-steps"></div></div><div id="ai-external-fields">${input('url','外部 Agent 地址',r.url||'','type="url"')}${keyField(r)}${input('timeout','请求超时（秒）',r.timeout||60,'type="number" min="5" max="120"')}<p class="field-hint">接收 message、conversation、contact、run_id、dry_run，返回 {"reply":"回复正文"}。不同联系人上下文独立传入。外部服务内部的工具权限与测试行为由该服务管理。</p></div><label class="ai-check"><input type="checkbox" name="enabled" ${r.enabled!==false?'checked':''}>启用 Agent</label>`;
+  if(kind==='agents')html+=input('description','Agent 职责',r.description||'')+`<input type="hidden" name="kind" value="${esc(r.kind||'workflow')}">`+`<div id="ai-workflow-fields"><div class="ai-form-grid">${select('provider_id','模型连接',options('providers',r.provider_id))}</div>${area('prompt','系统提示词 · 此 Agent 的职责与规则',r.prompt||'',4)}${input('temperature','回复温度（留空沿用模型连接）',r.temperature??'','type="number" min="0" max="2" step="0.05"')}<p class="field-hint">陪伴聊天可设为 0.9–1.0。只影响此 Agent 的回复，不改变共享模型或记忆分析。系统提示词支持 {{user_name}}、{{current_time}}、{{weather}}；每日首次回复更新心情和天气缓存，时间实时注入，未知资料不编造。</p><label class="field-label">绑定知识库</label>${checks('knowledge',r.knowledge_ids||[])}${select('knowledge_mode','知识检索方式',choose([['on_demand','按需检索（推荐）'],['always','每轮检索'],['off','不检索']],r.knowledge_mode||'on_demand'))}<label class="field-label">绑定 Skills</label>${checks('skills',r.skill_ids||[])}<label class="field-label">允许调用的工具</label>${checks('tools',r.tool_ids||[])}${select('web_policy','联网检索策略',choose([['auto','自动查证（推荐）'],['model','由模型决定'],['off','关闭联网检索']],r.web_policy||'auto'))}<p class="field-hint">自动查证：近期事实与不确定的问题先查询，闲聊不搜索；仅调用已授权工具，仍遵守工具确认设置。</p>${select('source_policy','参考链接展示',choose([['auto','智能展示：长内容摘要或主动索要时'],['requested','仅在用户索要时'],['always','每次查询后附来源']],r.source_policy||'auto'))}<p class="field-hint">查询来源始终保留在运行记录。普通短问答默认不附链接，地图、音乐或生成文件的链接正常提供。</p>${input('max_tool_rounds','最多工具调用轮数',r.max_tool_rounds||4,'type="number" min="1" max="10"')}<div class="ai-workflow-heading"><h3>处理流程</h3><button class="button secondary" id="ai-add-step" type="button">添加步骤</button></div><p class="field-hint">按顺序执行。模型可自主调用「工具与技能」中已授权的工具；固定工具参数支持 {{message}} 和 {{previous}}。</p><div id="ai-steps"></div></div><div id="ai-external-fields">${input('url','外部 Agent 地址',r.url||'','type="url"')}${keyField(r)}${input('timeout','请求超时（秒）',r.timeout||60,'type="number" min="5" max="120"')}<p class="field-hint">接收 message、conversation、contact、run_id、dry_run，返回 {"reply":"回复正文"}。不同联系人上下文独立传入。外部服务内部的工具权限与测试行为由该服务管理。</p></div>`;
   if(kind==='agents')html+='<div id="ai-companion-fields">'+agentFields(r.companion)+'</div>';
   if(kind==='agents')html+=hermesFields(r,data.providers,ctx.state.contacts,data.skills,esc);
   if(kind==='agents')html+=vibeFields(r,data.providers,await ctx.api('/api/ai/vibe/catalog'),esc);
   $('ai-editor-fields').innerHTML=html;
+  if(kind==='providers')bindProviderGuide(esc);
   if(kind==='mcp')bindMCPFields();
   if(kind==='services')bindServiceFields();
   if(kind==='skills')bindSkillFields(ctx);
@@ -274,7 +288,7 @@ function readSteps(){
   document.querySelectorAll('[data-step]').forEach((box,i)=>{const type=box.querySelector('[data-step-type]').value;steps[i]={type,instruction:box.querySelector('[data-step-instruction]')?.value||'',tool_id:box.querySelector('[data-step-tool]')?.value||'',arguments:JSON.parse(box.querySelector('[data-step-args]')?.value||'{}')};});
 }
 function renderSteps(){
-  $('ai-steps').innerHTML=steps.map((s,i)=>`<div class="ai-step" data-step="${i}"><div class="ai-step-line"><span class="ai-step-number">${String(i+1).padStart(2,'0')}</span><label><span class="sr-only">步骤 ${i+1} 类型</span><select data-step-type aria-label="步骤 ${i+1} 类型">${choose(Object.entries(stepNames),s.type)}</select></label><button class="icon-button" type="button" data-step-up="${i}" aria-label="上移步骤 ${i+1}">↑</button><button class="icon-button" type="button" data-step-down="${i}" aria-label="下移步骤 ${i+1}">↓</button><button class="icon-button" type="button" data-step-delete="${i}" aria-label="删除步骤 ${i+1}">×</button></div>${s.type==='model'?`<label class="ai-field"><span>这一步的处理要求</span><textarea data-step-instruction aria-label="这一步的处理要求" rows="3" placeholder="例如：先核对订单信息，再生成简洁回复">${esc(s.instruction)}</textarea></label>`:s.type==='tool'?`<label class="ai-field"><span>执行工具（需在能力与技能中授权）</span><select data-step-tool aria-label="执行工具（需在能力与技能中授权）">${options('tools',s.tool_id)}</select></label><label class="ai-field"><span>工具参数 JSON</span><textarea data-step-args aria-label="工具参数 JSON" rows="3">${esc(JSON.stringify(s.arguments||{},null,2))}</textarea></label>`:`<p class="field-hint">${s.type==='knowledge'?'从当前 Agent 绑定的知识库检索相关内容。':'将上一处理步骤的结果作为回复，按会话模式确认或发送。'}</p>`}</div>`).join('');
+  $('ai-steps').innerHTML=steps.map((s,i)=>`<div class="ai-step" data-step="${i}"><div class="ai-step-line"><span class="ai-step-number">${String(i+1).padStart(2,'0')}</span><label><span class="sr-only">步骤 ${i+1} 类型</span><select data-step-type aria-label="步骤 ${i+1} 类型">${choose(Object.entries(stepNames),s.type)}</select></label><button class="icon-button" type="button" data-step-up="${i}" aria-label="上移步骤 ${i+1}">↑</button><button class="icon-button" type="button" data-step-down="${i}" aria-label="下移步骤 ${i+1}">↓</button><button class="icon-button" type="button" data-step-delete="${i}" aria-label="删除步骤 ${i+1}">×</button></div>${s.type==='model'?`<label class="ai-field"><span>这一步的处理要求</span><textarea data-step-instruction aria-label="这一步的处理要求" rows="3" placeholder="例如：先核对订单信息，再生成简洁回复">${esc(s.instruction)}</textarea></label>`:s.type==='tool'?`<label class="ai-field"><span>执行工具（需在工具与技能中授权）</span><select data-step-tool aria-label="执行工具（需在工具与技能中授权）">${options('tools',s.tool_id)}</select></label><label class="ai-field"><span>工具参数 JSON</span><textarea data-step-args aria-label="工具参数 JSON" rows="3">${esc(JSON.stringify(s.arguments||{},null,2))}</textarea></label>`:`<p class="field-hint">${s.type==='knowledge'?'从当前 Agent 绑定的知识库检索相关内容。':'将上一处理步骤的结果作为回复，按会话模式确认或发送。'}</p>`}</div>`).join('');
   $('ai-steps').onchange=e=>{if(e.target.matches('[data-step-type]')){try{readSteps();renderSteps();}catch(error){ctx.toast('工具参数 JSON 格式不正确',true);}}};
   $('ai-steps').onclick=e=>{const b=e.target.closest('button');if(!b)return;try{readSteps();if(b.dataset.stepDelete!==undefined)steps.splice(Number(b.dataset.stepDelete),1);for(const [attr,delta] of [['stepUp',-1],['stepDown',1]])if(b.dataset[attr]!==undefined){const i=Number(b.dataset[attr]),j=i+delta;if(j>=0&&j<steps.length)[steps[i],steps[j]]=[steps[j],steps[i]];}renderSteps();}catch(error){ctx.toast('请先修正工具参数 JSON',true);}};
 }
@@ -291,7 +305,7 @@ async function saveEditor(e){
     if(kind==='tools'&&editing.resource.kind==='mcp'){const r=editing.resource;body={...body,kind:'mcp',description:get('description'),approval:get('approval'),enabled:form.has('enabled'),connection_id:r.connection_id,remote_name:r.remote_name,parameters:r.parameters};}
     if(kind==='agents'){
       if(get('kind')==='workflow')readSteps();
-      body={...body,description:get('description'),kind:get('kind'),provider_id:get('provider_id'),knowledge_ids:form.getAll('knowledge_ids'),knowledge_mode:get('knowledge_mode')||'on_demand',web_policy:get('web_policy')||'auto',source_policy:get('source_policy')||'auto',skill_ids:form.getAll('skills_ids'),tool_ids:form.getAll('tools_ids'),prompt:get('prompt'),temperature:get('temperature')===''?null:Number(get('temperature')),max_tool_rounds:Number(get('max_tool_rounds')),steps,url:get('url'),api_key:get('api_key')||null,clear_secret:form.has('clear_secret'),timeout:Number(get('timeout')),enabled:form.has('enabled')};
+      body={...body,description:get('description'),kind:get('kind'),provider_id:get('provider_id'),knowledge_ids:form.getAll('knowledge_ids'),knowledge_mode:get('knowledge_mode')||'on_demand',web_policy:get('web_policy')||'auto',source_policy:get('source_policy')||'auto',skill_ids:form.getAll('skills_ids'),tool_ids:form.getAll('tools_ids'),prompt:get('prompt'),temperature:get('temperature')===''?null:Number(get('temperature')),max_tool_rounds:Number(get('max_tool_rounds')),steps,url:get('url'),api_key:get('api_key')||null,clear_secret:form.has('clear_secret'),timeout:Number(get('timeout')),enabled:editing.resource.enabled!==false};
       body.companion=mergeCompanion(editing.resource.companion,readAgentFields(form));
       if(get('kind')==='hermes')Object.assign(body,readHermes(form));
       if(get('kind')==='vibe')Object.assign(body,readVibe(form));

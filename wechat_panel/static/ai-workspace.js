@@ -1,14 +1,13 @@
-import {organizeEditor} from './agent-editor.js';
+import {organizeEditor} from './agent-editor.js?v=skill-check-1';
 // Presentation only: existing resource IDs and execution permissions stay authoritative.
 export const sections = {
   agents: {label:'我的 Agent', tabs:['agents']},
-  extensions: {label:'扩展中心', tabs:['skills','connectors','tools']},
-  resources: {label:'资料与记忆', tabs:['knowledge','memory']},
-  schedules: {label:'自动任务', tabs:['schedules']},
+  extensions: {label:'扩展中心', tabs:['skills','tools']},
+  resources: {label:'知识库', tabs:['knowledge']},
   runs: {label:'运行记录', tabs:['runs']},
-  settings: {label:'设置', tabs:['providers','preferences']},
+  settings: {label:'设置', tabs:['providers','services','mcp','preferences']},
 };
-export const sectionFor = tab => Object.keys(sections).find(key=>sections[key].tabs.includes(tab)) || 'extensions';
+export const sectionFor = tab => ['memory','schedules'].includes(tab)?'agents': Object.keys(sections).find(key=>sections[key].tabs.includes(tab)) || 'extensions';
 
 export function renderNavigation(tab, labels) {
   const section=sectionFor(tab);
@@ -16,8 +15,8 @@ export function renderNavigation(tab, labels) {
     const active=button.dataset.aiSection===section;
     button.setAttribute('aria-selected',String(active));button.tabIndex=active?0:-1;
   });
-  document.getElementById('ai-workspace-settings').setAttribute('aria-pressed',String(section==='settings'));
   const subtabs=document.getElementById('ai-subtabs');
+  if(section==='settings'){subtabs.hidden=true;return;}
   const tabs=sections[section].tabs;
   const html=tabs.length===1?'':tabs.map(key=>`<button type="button" role="tab" data-ai-tab="${key}" aria-selected="${key===tab}" tabindex="${key===tab?0:-1}"${key==='tools'?' class="ai-advanced-link"':''}>${labels[key]}</button>`).join('');
   if(subtabs.innerHTML!==html)subtabs.innerHTML=html;
@@ -32,13 +31,14 @@ export function bindTabKeys(element) {
     if(index<0)return;
     event.preventDefault();
     const next=event.key==='Home'?0:event.key==='End'?buttons.length-1:(index+(event.key==='ArrowRight'?1:-1)+buttons.length)%buttons.length;
-    const key=buttons[next].dataset.aiTab,section=buttons[next].dataset.aiSection;
+    const key=buttons[next].dataset.aiTab,section=buttons[next].dataset.aiSection,ownerTab=buttons[next].dataset.agentPage;
     buttons[next].click();
-    element.querySelector(key?`[data-ai-tab="${key}"]`:`[data-ai-section="${section}"]`)?.focus();
+    element.querySelector(ownerTab?`[data-agent-page="${ownerTab}"]`:key?`[data-ai-tab="${key}"]`:`[data-ai-section="${section}"]`)?.focus();
   });
 }
 
 const bundles = [
+  {id:'news',name:'新闻汇总',description:'汇总多来源新闻',tools:['news_collect'],skill:'news-aggregator-skill'},
   {id:'search',name:'联网查证',description:'搜索网页，读取原文',tools:['web_search','read_web'],service:'search'},
   {id:'video',name:'视频总结',description:'读取字幕，提炼视频内容',tools:['read_web'],skill:'web-video-reader'},
   {id:'platforms',name:'多平台阅读',description:'平台搜索、正文与热门内容',tools:['platform_search','platform_read','platform_browse'],skill:'agent-reach-platforms'},
@@ -66,7 +66,7 @@ export function capabilityState(bundle, data, toolIds, skillIds, serviceId='', w
     if(!service)missing.push('未选择'+{search:'搜索',tts:'语音',image:'绘图'}[bundle.service]+'服务');
     else if(!service.enabled)missing.push('连接器已停用');
   }
-  if(['search','video','platforms'].includes(bundle.id)&&webPolicy==='off')missing.push('当前已关闭联网');
+  if(['search','video','platforms','news'].includes(bundle.id)&&webPolicy==='off')missing.push('当前已关闭联网');
   return {bound,needed,skill,missing};
 }
 

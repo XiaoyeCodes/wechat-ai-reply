@@ -240,7 +240,7 @@ class AIService:
         if state.get('agent_schedule'):
             system+='\n本轮为公共定时任务，以上 Agent 规则中的个人称呼、亲密互动或个人背景不适用于本轮。保留公共职责、校验与输出规则，完整执行本轮任务，不夹带私有资料。'
         from .voice_reply import preference_prompt
-        system+=preference_prompt(self.store.contact(run['contact_id']) if run.get('contact_id') else None)
+        system+=preference_prompt(self.store.contact(run['contact_id']) if run.get('contact_id') else None,self.store)
         if primary and not state.get('agent_schedule'):system+='\n当前角色的身份、称呼与表达方式以以上系统提示词为准。历史助手回复只供理解话题，不作为风格示范或当前身份设定。'
         if not state.get('agent_schedule'):system+=self.companion.prompt(state)
         from .dialogue_rhythm import instruction as pacing_instruction
@@ -355,7 +355,8 @@ class AIService:
             self.data.update_run(rid,status='running')
             from .voice_reply import switch_only
             if run.get('contact_id') and not run['dry_run'] and switch_only(run['input']):
-                preference=self.store.contact(run['contact_id']).get('reply_format','text')
+                from .voice_reply import preferences
+                preference=preferences(self.store,self.store.contact(run['contact_id']))['reply_format']
                 self.data.trace(rid,'回复形式确认',{'reply_format':preference})
                 self.finish(rid,'好呀，之后用'+('语音' if preference=='voice' else '文字')+'回复你。')
                 return
@@ -551,7 +552,8 @@ class AIService:
             self.data.trace(rid, 'PDF 排版完成', {'name': path.name, 'bytes': path.stat().st_size, 'theme': 'navy-gold'})
         from .companion import companion_config
         c=companion_config(state['snapshot']['agent'])
-        native_voice=run.get('contact_id') and self.store.contact(run['contact_id']).get('reply_format')=='voice'
+        from .voice_reply import preferences
+        native_voice=run.get('contact_id') and preferences(self.store,self.store.contact(run['contact_id']))['reply_format']=='voice'
         if not state.get('group_sender') and not image_ids and c['media']['auto_voice'] and c['media']['tts_service_id'] and not native_voice and not state.get('analysis',{}).get('risk')=='urgent':
             try:self.companion.tool({'builtin':'speak'},{'text':reply},run,state)
             except Exception:self.data.trace(rid,'语音暂不可用',{'detail':'文字回复继续，检查语音连接'})

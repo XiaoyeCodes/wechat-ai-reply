@@ -2,9 +2,15 @@ const $=id=>document.getElementById(id);
 let ctx,voices=[],contextKey='',audioURL='',controller=null,requestVersion=0,minimax={};
 let sourceURL='',cloneRequest='',cloning=false,settingsBusy=false,pendingChanges=0;
 let settingsDraft=null,saveError='',savedNotice='',contactSave=Promise.resolve();
+let settingsTarget=null;
+const catalogListeners=new Set();
+const effectiveContact=c=>c?.reply_format==='agent'?{...c,...c.voice_settings}:c;
+const settingsCurrent=()=>settingsTarget?settingsTarget.current():effectiveContact(ctx?.current());
+export async function voiceCatalog(){if(!voices.length)await loadVoices();return {voices,minimax};}
+export function onVoiceCatalog(listener){catalogListeners.add(listener);return ()=>catalogListeners.delete(listener);}
 
 function settingsDirty(){
-  const c=ctx?.current();
+  const c=settingsCurrent();
   return !!$('minimax-key').value.trim()||!!(settingsDraft&&c?.id===settingsDraft.contactId&&
     (settingsDraft.voice!==c.voice_preset||settingsDraft.model!==(c.voice_model||'speech-2.8-turbo')));
 }
@@ -24,7 +30,7 @@ function availability(){
   $('minimax-key-status').textContent=minimax.key_configured?'Key 已保存':'尚未配置 Key';
   $('minimax-refresh').disabled=!minimax.key_configured||settingsBusy||cloning;
   $('minimax-clear').disabled=!minimax.key_configured||settingsBusy||cloning;
-  const wrongContact=!!settingsDraft&&settingsDraft.contactId!==(ctx.current()?.id||null);
+  const wrongContact=!!settingsDraft&&settingsDraft.contactId!==(settingsCurrent()?.id||null);
   $('minimax-save').disabled=settingsBusy||cloning||pendingChanges>0||wrongContact;
   $('minimax-save').textContent=settingsBusy?'正在保存…':'保存设置';
   $('minimax-close').disabled=settingsBusy||cloning;
@@ -38,7 +44,7 @@ function availability(){
   saveState.dataset.error=!!saveError||wrongContact;
   $('minimax-save-hint').textContent=$('minimax-clone-file').files.length?
     '录音需单独点击“上传并创建音色”，保存不会上传录音。':
-    settingsDraft?.contactId?'保存连接、所选音色与合成模型。':'保存 MiniMax 连接；选择联系人后可保存音色。';
+    settingsTarget?'将音色和模型填入 Agent 草稿，再点击“保存配置”生效。':settingsDraft?.contactId?'保存连接、所选音色与合成模型。':'保存 MiniMax 连接；选择联系人后可保存音色。';
   $('minimax-clone-submit').disabled=!minimax.key_configured||cloning||settingsBusy;
   $('minimax-clone-file').disabled=cloning;$('minimax-clone-name').disabled=cloning;
   for(const button of $('minimax-my-voices').querySelectorAll('[data-preview-voice]'))
@@ -64,6 +70,7 @@ async function loadVoices(){
   if(!$('minimax-preview-text').value)$('minimax-preview-text').value=data.sample_text;
   renderMyVoices();
   renderVoice(ctx.current());availability();
+  for(const listener of catalogListeners)listener({voices,minimax});
 }
 
 function renderMyVoices(){
@@ -115,6 +122,7 @@ async function previewVoice(voice_id,model,inDialog=false){
 }
 
 export function renderVoice(contact){
+  contact=effectiveContact(contact);
   $('voice-studio').hidden=contact?.reply_format!=='voice';
   const key=contact?[contact.id,contact.voice_preset||'windows-huihui',contact.reply_format||'text',contact.voice_model||''].join(':'):'';
   if(key!==contextKey){stopPreview();contextKey=key;}
@@ -139,15 +147,16 @@ export function renderVoice(contact){
   if(!controller)availability();
 }
 
-export async function openVoiceSettings(){
+export async function openVoiceSettings(target=null){
   await contactSave;
-  const contact=ctx.current();
+  settingsTarget=target?.current?target:null;
+  const contact=settingsCurrent();
   settingsDraft={contactId:contact?.id||null,voice:contact?.voice_preset||'windows-huihui',model:contact?.voice_model||'speech-2.8-turbo'};
   saveError='';savedNotice='';
   stopPreview();$('minimax-key').value='';$('minimax-dialog').showModal();
-  $('minimax-settings-context').textContent=contact?'为 '+contact.lookup+' 选择声音，保存后用于微信语音回复。':'管理 MiniMax 连接与专属音色。选择联系人后可设置回复声音。';
+  $('minimax-settings-context').textContent=settingsTarget?'为 '+contact.lookup+' 选择默认声音，填入后点击 Agent 的“保存配置”生效。':contact?'为 '+contact.lookup+' 选择声音，保存后用于微信语音回复。':'管理 MiniMax 连接与专属音色。选择联系人后可设置回复声音。';
   settingsTab(voices.some(v=>v.engine==='minimax'&&v.kind!=='system')?'voices':'setup');
-  $('minimax-preview-model').value=ctx.current()?.voice_model||'speech-2.8-turbo';
+  $('minimax-preview-model').value=contact?.voice_model||'speech-2.8-turbo';
   $('minimax-preview-text').value=$('voice-sample').value;
   try{await loadVoices();}
   catch(e){$('minimax-config-status').textContent=e.message;$('minimax-config-status').dataset.error=true;}
@@ -157,6 +166,7 @@ export function initVoice(context){
   ctx=context;
   async function saveVoice(changes){
     const c=ctx.current();if(!c)return;
+    if(c.reply_format==='agent')changes={...c.voice_settings,...changes,reply_format:'voice'};
     pendingChanges++;stopPreview();
     try{await ctx.patchContact(c.id,changes);}
     finally{pendingChanges--;renderVoice(ctx.current());availability();}
@@ -183,7 +193,7 @@ export function initVoice(context){
     const button=e.target.closest('button');if(!button||button.disabled)return;
     if(button.dataset.previewVoice)return previewVoice(button.dataset.previewVoice,$('minimax-preview-model').value,true);
     if(button.dataset.useVoice){
-      if(!settingsDraft||settingsDraft.contactId!==ctx.current()?.id)return;
+      if(!settingsDraft||settingsDraft.contactId!==settingsCurrent()?.id)return;
       settingsDraft.voice=button.dataset.useVoice;changedSettings();
       $('minimax-preview-status').textContent='已选择此音色，点击底部“保存设置”后生效。';
     }
@@ -197,7 +207,7 @@ export function initVoice(context){
   };
   $('minimax-close').onclick=()=>close();$('minimax-done').onclick=()=>close(true);
   $('minimax-dialog').addEventListener('cancel',e=>{e.preventDefault();close();});
-  $('minimax-dialog').addEventListener('close',()=>{settingsDraft=null;saveError='';savedNotice='';stopPreview();$('minimax-key').value='';$('minimax-source-audio').pause();});
+  $('minimax-dialog').addEventListener('close',()=>{settingsDraft=null;settingsTarget=null;saveError='';savedNotice='';stopPreview();$('minimax-key').value='';$('minimax-source-audio').pause();});
   async function configAction(action,message){
     if(settingsBusy||cloning)return;
     settingsBusy=true;stopPreview();availability();status('minimax-config-status','正在处理…');
@@ -206,7 +216,7 @@ export function initVoice(context){
     finally{settingsBusy=false;availability();}
   }
   async function saveSettings(){
-    if(settingsBusy||cloning||!settingsDraft||settingsDraft.contactId!==(ctx.current()?.id||null))return;
+    if(settingsBusy||cloning||!settingsDraft||settingsDraft.contactId!==(settingsCurrent()?.id||null))return;
     const draft={...settingsDraft},key=$('minimax-key').value.trim();let keySaved=false;
     settingsBusy=true;saveError='';savedNotice='';stopPreview();availability();
     try{
@@ -214,15 +224,16 @@ export function initVoice(context){
         minimax=await ctx.api('/api/voice/minimax/config',{method:'PUT',body:{api_key:key}});
         keySaved=true;$('minimax-key').value='';
       }
-      const contact=ctx.current();
+      const contact=settingsCurrent();
       if(draft.contactId){
         if(contact?.id!==draft.contactId)throw Error('联系人已变化，请重新打开设置');
         const changes={};
         if(draft.voice!==contact.voice_preset)changes.voice_preset=draft.voice;
         if(draft.model!==(contact.voice_model||'speech-2.8-turbo'))changes.voice_model=draft.model;
         if(Object.keys(changes).length){
-          await ctx.patchContact(draft.contactId,changes);
-          if(ctx.current()?.id!==draft.contactId||Object.entries(changes).some(([k,v])=>ctx.current()?.[k]!==v))
+          if(settingsTarget)await settingsTarget.save(changes);
+          else await ctx.patchContact(draft.contactId,ctx.current()?.reply_format==='agent'?{...ctx.current().voice_settings,...changes,reply_format:'voice'}:changes);
+          if(settingsCurrent()?.id!==draft.contactId||Object.entries(changes).some(([k,v])=>settingsCurrent()?.[k]!==v))
             throw Error('联系人音色设置未保存，请重试');
         }
       }

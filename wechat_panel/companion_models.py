@@ -65,6 +65,12 @@ class MediaOptions(Strict):
     image_prompt: str=Field(default='',max_length=3000)
 
 
+class ReplyVoiceOptions(Strict):
+    reply_format: Literal['text','voice']='text'
+    preset: str=Field(default='xiaoxiao',min_length=1,max_length=300)
+    model: Literal['speech-2.8-turbo','speech-2.8-hd']='speech-2.8-turbo'
+
+
 class SafetyOptions(Strict):
     emotion_enabled: bool=True
     crisis_detection: bool=True
@@ -78,6 +84,7 @@ class Companion(Strict):
     memory: MemoryOptions=Field(default_factory=MemoryOptions)
     care: CareOptions=Field(default_factory=CareOptions)
     media: MediaOptions=Field(default_factory=MediaOptions)
+    voice: ReplyVoiceOptions=Field(default_factory=ReplyVoiceOptions)
     safety: SafetyOptions=Field(default_factory=SafetyOptions)
     search_service_id: str=Field(default='',max_length=100)
     news_verify: bool=False

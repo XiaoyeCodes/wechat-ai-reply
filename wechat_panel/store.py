@@ -204,9 +204,8 @@ class Store:
         if set(values) & (RULE_FIELDS | set(VERIFICATION_FIELDS)) and not is_group(current):
             raise ValueError('群监听规则仅适用于群聊')
         if 'group_members' in values:values['group_members'] = json.dumps(members(values['group_members']),ensure_ascii=False)
-        if is_group(current) and values.get('reply_format') == 'voice':raise ValueError('群聊当前支持文字和图片回复')
-        if 'reply_format' in values and values['reply_format'] not in ('text','voice'):
-            raise ValueError('回复形式只支持文字或语音')
+        if 'reply_format' in values and values['reply_format'] not in ('agent','text','voice'):
+            raise ValueError('请选择跟随 Agent、文字或语音回复')
         if 'voice_preset' in values:
             from .voice_synthesis import preset
             preset(values['voice_preset'],store=self)

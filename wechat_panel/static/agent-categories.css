@@ -1,0 +1,52 @@
+.agent-editor-tabs{background:#fff;gap:22px;padding:0 28px}
+.agent-editor-tabs button{padding:17px 0 14px;border-radius:0;border-bottom:3px solid transparent;font-weight:600;color:#819077;flex-shrink:0}
+.agent-editor-tabs button[aria-selected=true]{background:transparent;color:#1d5744;border-bottom-color:#1d5744;box-shadow:none}
+.agent-pane-heading{margin:22px 0}.agent-pane-heading h3{font-size:18px}.agent-pane-heading p{margin:7px 0 0;line-height:1.7}
+#agent-rights{border:0;background:transparent;margin:0 0 24px}
+#agent-rights>summary{display:none}
+#agent-rights>.ai-editor-section-body{padding:0}
+.agent-resource-search{margin:0 0 12px!important}
+.agent-resource-search input{background:#f6f8f2!important;min-height:42px}
+.agent-resource-groups{display:block;grid-template-columns:none;margin:12px 0 24px}
+.agent-resource-group{background:#f9fbf6;border-radius:12px;margin:10px 0}
+.agent-resource-group>summary{display:flex;align-items:center;gap:12px;padding:13px 16px;list-style:none}
+.agent-resource-group>summary::before{content:'›';font-size:18px;color:#7d9273;transition:transform .15s}
+.agent-resource-group[open]>summary::before{transform:rotate(90deg)}
+.agent-resource-group>summary strong{font-size:12px;flex:1}
+.agent-resource-group>summary span{margin:0;font-size:10px;color:#89967f}
+.agent-resource-group>.agent-resource-choices{padding:0 12px 12px;gap:8px}
+.agent-resource-choices .ai-check{padding:12px;border-radius:9px}
+.agent-resource-choices .ai-check:has(input:checked){background:#f0f6e9;border-color:#bfd1ad}
+.agent-resource-choices small{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.65}
+.agent-resource-choices em{font-size:10px;color:#85967b}
+.agent-resource-choices [data-resource-choice][hidden]{display:none!important}
+.agent-skill-setup{padding:0 12px 12px 36px}
+.agent-skill-setup .field-hint{font-size:10px;line-height:1.7;margin:0 0 10px}
+.agent-skill-setup .button{font-size:11px;padding:7px 11px}
+.agent-editor-pane .cp-feature{padding:17px;border-radius:12px}
+.agent-editor-pane .cp-feature>p{font-size:12px;line-height:1.8}
+.agent-voice-studio{max-width:680px;margin:18px 0 0;padding:22px;border-radius:18px}
+.agent-voice-studio .voice-studio-heading{margin-bottom:18px}
+.agent-voice-studio .voice-studio-heading h4{margin:0;font-size:17px}
+.agent-voice-studio .ai-field{margin:16px 0 10px}
+.agent-voice-studio .voice-manage-button,.agent-voice-studio .voice-preview-button{width:100%;margin:14px 0}
+.agent-voice-studio audio{width:100%;margin:12px 0}
+@media(max-width:760px){.agent-editor-tabs{gap:16px;padding:0 14px}.agent-editor-tabs button{flex:0 0 auto;padding:14px 0 12px;font-size:11px}.agent-pane-heading{margin:18px 0}.agent-skill-setup{padding-left:12px}}
+
+/* Shared resources and Agent-owned settings have separate navigation. */
+.ai-agent-context{margin:24px 0 0;padding:20px 24px 0;border:1px solid var(--line,#dce4d6);border-radius:16px;background:var(--surface,#fff)}
+.ai-agent-context-heading{display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.ai-agent-context-heading strong{font-size:20px;margin-right:auto}
+.ai-agent-context .ai-subtabs{margin:16px 0 0}
+.ai-agent-card .ai-card-footer{align-items:flex-start;flex-direction:column}
+.ai-agent-card .ai-card-footer>div{display:flex;gap:12px;flex-wrap:wrap}
+@media(max-width:600px){.ai-agent-context{padding:16px 16px 0}.ai-agent-context-heading{gap:10px}.ai-agent-context-heading strong{flex-basis:60%}}
+
+.ai-agent-detail .ai-hero,.ai-agent-detail .ai-summary,.ai-agent-detail .ai-settings-bar,.ai-agent-detail .companion-banner{display:none}
+.ai-agent-detail>.ai-tabs{margin-top:20px}
+
+/* Skills are single selectable cards, without a second action row. */
+.agent-resource-choices .ai-check{transition:background .15s,border-color .15s}
+.agent-resource-choices .ai-check:hover{border-color:#9db58e;background:#f7faf3}
+.agent-resource-choices .ai-check:focus-within{outline:2px solid #789e67;outline-offset:2px}
+.agent-resource-choices .ai-check:has(input:checked){background:#eff5e9;border-color:#abc49a}

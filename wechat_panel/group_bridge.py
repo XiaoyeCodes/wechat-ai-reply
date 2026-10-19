@@ -103,6 +103,27 @@ def roster(panel, total=None):
     return names, complete
 
 
+def group_info_panel(window):
+    nodes = [n for n in _nodes(window) if _kind(n) == 'Group' and _visible(n)]
+    panels = [n for n in nodes if _auto_id(n) in
+              ('group_chat_info_view', 'chat_room_info_view', 'chatroom_info_view')]
+    if not panels:
+        # Weixin 4.1.15 exposes the member panel by class, with an empty ID.
+        panels = [n for n in nodes if _class(n) == 'mmui::chatroommemberinfoview']
+    panels = _unique_controls(panels)
+    if len(panels) > 1:raise GroupEvidenceError('群信息面板不唯一，已停止核验')
+    return panels[0] if panels else None
+
+
+def member_list_roster(listing, total):
+    # Qt's picker may expose every member without giving any row keyboard
+    # focus. Empty section/separator cells are not members; duplicate names
+    # remain separate so selected_members can reject ambiguous identities.
+    rows = _unique_controls(listing.children(control_type='ListItem'))
+    names = [_name(row) for row in rows if _visible(row) and _name(row)]
+    return names, isinstance(total, int) and total > 0 and len(names) == total
+
+
 def self_alias(panel):
     labels = {'我在本群的昵称', '我在群組的暱稱', 'My Alias in Group'}
     nodes = _nodes(panel)
@@ -235,6 +256,8 @@ without exporting or traversing the message-history list behind that picker.
         if len(lists)!=1:raise GroupEvidenceError('群成员列表不可唯一识别')
         listing=lists[0]
         bridge._record('ui.group.members.read',contact)
+        names,complete=member_list_roster(listing,total)
+        if complete:return names,True
         bridge._focus(popup,contact)
         listing.set_focus();listing.type_keys('{HOME}')
         entries=[];previous=None;deadline=time.monotonic()+40
@@ -276,15 +299,13 @@ def inspect_group(bridge, lookup, group_members=None, group_self_name='', accoun
         bridge._focus(window,target)
         # Native group settings contain ChatMemberCell controls just like the
         # existing direct-profile view. Their names are separate from messages.
-        for aid in ('group_chat_info_view','chat_room_info_view','chatroom_info_view'):
-            candidate=window.child_window(auto_id=aid,control_type='Group')
-            if candidate.exists(timeout=.1):panel=candidate;break
-        if panel is None or not panel.is_visible():
+        panel=group_info_panel(window)
+        if panel is None:
             bridge._click(button,target,'ui.group.info.open');opened=True
-            time.sleep(.15)
-            for aid in ('group_chat_info_view','chat_room_info_view','chatroom_info_view'):
-                candidate=window.child_window(auto_id=aid,control_type='Group')
-                if candidate.exists(timeout=.2) and candidate.is_visible():panel=candidate;break
+            deadline=time.monotonic()+2
+            while panel is None and time.monotonic()<deadline:
+                time.sleep(.1)
+                panel=group_info_panel(window)
         if panel is not None:
             names,complete=roster(panel,total)
             alias=self_alias(panel)

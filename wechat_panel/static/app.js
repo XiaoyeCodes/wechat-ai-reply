@@ -1,4 +1,4 @@
-import {initAI, refreshAI, scheduleAIRefresh, renderContactAI} from './ai.js?v=groups-1';
+import {initAI, refreshAI, scheduleAIRefresh, renderContactAI,activateAIView} from './ai.js?v=api-settings-1';
 import {initVoice,renderVoice} from './voice.js?v=voice-settings-3';
 import {initGroups,isGroup,groupSummary,contactKindChanged,newContactBody,renderGroupDetails,groupMessageSender,demoIncomingBody} from './groups.js?v=1';
 
@@ -62,11 +62,11 @@ async function api(path, {method='GET', body, ...options}={}) {
 }
 function setView(view) {
   state.view=view;
-  for (const key of ['chat','contacts','status','agent','ai']) $('view-'+key).hidden=key!==view;
+  for (const key of ['chat','contacts','status','agent','ai','settings']) $('view-'+key).hidden=key!==view;
   document.querySelectorAll('.nav-item').forEach(b=>{b.classList.toggle('active',b.dataset.view===view);b.setAttribute('aria-current',b.dataset.view===view?'page':'false');});
-  $('page-title').textContent={chat:'聊天工作台',contacts:'联系人管理',status:'运行状态',agent:'Agent 接口',ai:'AI 中心'}[view];
+  $('page-title').textContent={chat:'聊天工作台',contacts:'联系人管理',status:'运行状态',agent:'Agent 接口',ai:'AI 中心',settings:'设置'}[view];
   if(view==='status') renderStatus();
-  if(view==='ai') refreshAI().catch(error=>toast(error.message,true));
+  if(view==='ai'||view==='settings'){activateAIView(view);refreshAI().catch(error=>toast(error.message,true));}
 }
 document.querySelectorAll('.nav-item[data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
 $('connection-button').onclick=$('banner-status').onclick=()=>setView('status');
@@ -142,7 +142,7 @@ function renderDetails() {
   $('listener-error').hidden=!c.error;$('listener-error').textContent=c.error;
   $('conversation-mode').value=c.mode;
   $('reply-format').value=c.reply_format||'text';
-  $('reply-format-hint').textContent=c.reply_format==='voice'?'已启用微信原生语音。长文、链接和审批仍用文字；录音时需要微信保持前台。可在微信说“改回文字回复”。':'仅对当前联系人生效。可在微信说“以后用语音回复”开启；人工输入仍发送文字。';
+  $('reply-format-hint').textContent=c.reply_format==='agent'?'使用所绑定 Agent 的回复方式与默认声音。单独选择文字或语音后，仅对当前联系人生效。':c.reply_format==='voice'?'已启用微信原生语音。长文、链接和审批仍用文字；录音时需要微信保持前台。可在微信说“改回文字回复”。':'仅对当前联系人生效。可在微信说“以后用语音回复”开启；人工输入仍发送文字。';
   $('retry-listener').hidden=c.listener_state!=='error';
   $('demo-controls').hidden=!state.status.demo;
   renderContactAI();

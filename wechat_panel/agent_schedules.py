@@ -31,6 +31,15 @@ class AgentSchedule(BaseModel):
     cron: str = Field(default='', max_length=80)
     timezone: str = Field(default='Asia/Shanghai', max_length=100)
     enabled: bool = False
+    recipient_ids: list[str] | None = Field(default=None, min_length=1, max_length=200)
+
+    @field_validator('recipient_ids')
+    @classmethod
+    def recipients(cls, value):
+        if value is None:return None
+        if any(not item.strip() or len(item) > 100 for item in value):
+            raise ValueError('请选择有效的接收联系人或群聊')
+        return list(dict.fromkeys(item.strip() for item in value))
 
     @field_validator('agent_id', 'title', 'instruction')
     @classmethod
@@ -65,6 +74,12 @@ def metadata(run):
     return run.get('state', {}).get('agent_schedule')
 
 
+def recipient_matches(contact, recipient_ids):
+    if contact.get('chat_type') == 'group' and not contact.get('group_identity_verified'):return False
+    return (contact.get('chat_type', 'direct') == 'direct' if recipient_ids is None
+            else contact['id'] in recipient_ids)
+
+
 def task_valid(store, run):
     """Called by both the AI worker and the serial send worker before effects."""
     task = metadata(run)
@@ -87,6 +102,7 @@ def task_valid(store, run):
             recipient = db.execute('SELECT * FROM agent_schedule_recipients WHERE occurrence_id=? AND contact_id=?',
                                    (task['occurrence_id'], contact['id'])).fetchone()
         return bool(recipient and recipient['run_id'] == run['id'] and recipient['status'] in ('claimed', 'queued')
+                    and recipient_matches(contact, value.get('recipient_ids'))
                     and contact['listening'] and contact['mode'] == 'ai_auto'
                     and contact['ai_agent_id'] == run['agent_id'] and contact['ai_delivery_revision'] == run['revision'])
     except (KeyError, ValueError, TypeError):return False
@@ -125,14 +141,14 @@ class AgentScheduler:
         from croniter import croniter
         return croniter(value['cron'], (after or datetime.now(timezone.utc)).astimezone(ZoneInfo(value['timezone']))).get_next(datetime).astimezone(timezone.utc).isoformat()
 
-    def eligible(self, agent_id):
+    def eligible(self, agent_id, recipient_ids=None):
         self.ai.data.get('agents', agent_id)
-        return [c for c in self.store.contacts() if c.get('chat_type','direct')=='direct'
+        return [c for c in self.store.contacts() if recipient_matches(c, recipient_ids)
                 and c['listening'] and c['mode'] == 'ai_auto' and c['ai_agent_id'] == agent_id]
 
     def _public(self, row):
         value = json.loads(unprotect(row['data']))
-        try:count = len(self.eligible(value['agent_id']))
+        try:count = len(self.eligible(value['agent_id'], value.get('recipient_ids')))
         except KeyError:count = 0
         return value | {k:row[k] for k in ('id', 'next_at', 'last_status', 'created_at', 'updated_at')} | {'eligible_count':count}
 
@@ -153,6 +169,10 @@ class AgentScheduler:
             except ValidationError as exc:
                 raise ValueError('；'.join(e['msg'].replace('Value error, ', '') for e in exc.errors(include_input=False))) from None
             agent = self.ai.data.get('agents', value['agent_id'])
+            for cid in value['recipient_ids'] or []:
+                contact = self.store.contact(cid)
+                if contact['ai_agent_id'] != value['agent_id']:
+                    raise ValueError('所选接收会话须绑定此 Agent，请检查联系人或群聊设置')
             # Desktop agents require a specific human's authority. They cannot
             # borrow that authority to publish results to unrelated contacts.
             if agent['kind'] != 'workflow':raise ValueError('当前仅工作流 Agent 支持公共定时推送；请先选择工作流 Agent')
@@ -209,7 +229,7 @@ class AgentScheduler:
             value = self.get(sid)
             if not value['enabled']:raise ValueError('请先启用此定时任务，再立即执行')
             if self.store.paused() or not self.ai.data.settings()['enabled']:raise ValueError('请先恢复运行并开启 AI 总开关')
-            if not self.eligible(value['agent_id']):raise ValueError('没有符合条件的联系人：需监听此 Agent 且开启 AI 自动回复')
+            if not self.eligible(value['agent_id'], value.get('recipient_ids')):raise ValueError('没有符合条件的联系人或群聊：需监听此 Agent 且开启 AI 自动回复')
             self.ai.snapshot(value['agent_id'])
             with self.store.connect() as db:
                 active = db.execute("SELECT 1 FROM agent_schedule_occurrences WHERE schedule_id=? AND status IN ('claimed','pending','running','waiting_approval','queued')", (sid,)).fetchone()
@@ -234,8 +254,8 @@ class AgentScheduler:
             if source == 'scheduled' and (stamp - datetime.fromisoformat(scheduled_at)).total_seconds() > 300:
                 raise ValueError('跳过过期日程，避免重启后集中补发')
             if self.store.paused() or not self.ai.data.settings()['enabled']:raise ValueError('运行或 AI 已暂停，本次已跳过')
-            targets = self.eligible(value['agent_id'])
-            if not targets:raise ValueError('没有符合条件的监听且 AI 自动回复联系人，本次已跳过')
+            targets = self.eligible(value['agent_id'], value.get('recipient_ids'))
+            if not targets:raise ValueError('没有符合条件的监听且 AI 自动回复联系人或群聊，本次已跳过')
             with self.store.connect() as db:
                 active = db.execute("SELECT 1 FROM agent_schedule_occurrences WHERE schedule_id=? AND id!=? AND status IN ('claimed','pending','running','waiting_approval','queued')", (value['id'], oid)).fetchone()
             if active:raise ValueError('上一次任务尚未结束，本次已跳过')
@@ -275,7 +295,8 @@ class AgentScheduler:
                 record=db.execute('SELECT targets FROM agent_schedule_occurrences WHERE id=?', (oid,)).fetchone()
                 targets={c['id']:c['revision'] for c in json.loads(unprotect(record['targets']))}
                 db.execute("UPDATE agent_schedule_occurrences SET status='queued',updated_at=? WHERE id=?", (now(), oid))
-            for contact in self.eligible(run['agent_id']):
+            value = self.get(task['schedule_id'])
+            for contact in self.eligible(run['agent_id'], value.get('recipient_ids')):
                 if targets.get(contact['id']) != contact['ai_delivery_revision']:continue
                 if not task_valid(self.store, run):break
                 delivery_id = str(uuid.uuid4());stamp = now()

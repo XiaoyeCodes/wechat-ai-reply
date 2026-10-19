@@ -1,6 +1,6 @@
-import {openVoiceSettings} from './voice.js?v=voice-settings-3';
-import {renderAgentSchedules,updateAgentSchedules} from './agent-schedules.js?v=1';
-let ctx,library,activeTab='',selection={agent_id:'',contact_id:''};
+import {renderAgentSchedules,updateAgentSchedules} from './agent-schedules.js?v=ownership-1';
+import {agentVoiceFields,bindAgentVoice} from './agent-voice.js?v=1';
+let ctx,library,activeTab='',ownerId='',memoryRequest=0,selection={agent_id:'',contact_id:''};
 const $=id=>document.getElementById(id),esc=v=>ctx.escape(v??'');
 const field=(name,label,value='',type='text',extra='')=>`<label class="ai-field"><span>${esc(label)}</span><input name="${name}" aria-label="${esc(label)}" value="${esc(value)}" type="${type}" ${extra}></label>`;
 const area=(name,label,value='',rows=3)=>`<label class="ai-field"><span>${esc(label)}</span><textarea name="${name}" aria-label="${esc(label)}" rows="${rows}">${esc(value)}</textarea></label>`;
@@ -23,9 +23,8 @@ export const serviceDrivers={
 export const serviceCategories=[['memory','外部记忆'],['search','联网搜索'],['tts','语音合成'],['image','图像生成'],['observability','可观测性']];
 
 function mediaFields(media){
- return `<section class="cp-feature cp-voice-feature"><span class="eyebrow">WECHAT VOICE</span><h4>微信语音回复</h4><p>音色与回复形式按联系人保存。同一个 Agent 可以为不同的人使用不同的声音。</p><button type="button" class="button secondary" id="cp-minimax-open">MiniMax 设置与声音克隆</button><p class="field-hint">在聊天右侧选择「语音回复 → 声音与试听」，可选在线女声、本机女声或 MiniMax 音色，并切换 Turbo / HD。这里打开的是同一份 MiniMax 配置。</p></section>`+
- `<section class="cp-feature"><h4>收到图片时</h4>${check('cp.media.understand_images','理解收到的照片',media.understand_images)}<div id="cp-vision-options">${select('cp.media.vision_provider_id','图片理解模型连接',options('providers',null,'沿用当前聊天模型'),media.vision_provider_id||'')}<p class="field-hint">需要支持图片输入的模型；聊天模型不支持时，单独选择视觉模型。适用于微信收图和测试台上传，不控制图片生成。</p></div></section>`+
- `<section class="cp-feature"><h4>生成与修改图片</h4>${select('cp.media.image_service_id','图像生成服务',options('services','image'),media.image_service_id||'')}<p class="field-hint" id="cp-image-status" role="status"></p><div id="cp-image-options">${area('cp.media.image_prompt','形象补充提示词（可选）',media.image_prompt||'')}<details class="cp-advanced" id="cp-image-reference"><summary>固定角色参考图（高级）</summary>${field('cp.media.reference_media_id','角色参考图 ID',media.reference_media_id||'')}<p class="field-hint">填写本工作台已有图片的 ID。一般图生图直接使用本轮收到或上传的图片，无需填写。</p></details><div id="cp-image-lora">${formGrid(field('cp.media.lora','LoRA 名称或地址',media.lora||'')+field('cp.media.lora_scale','LoRA 权重',media.lora_scale??.8,'number','min="0" max="2" step="0.1"'))}<p class="field-hint">仅图像 HTTP 网关支持，名称与权重由你的网关解释。</p></div><div id="cp-image-incompatible" class="cp-notice" hidden><p>保存的参考图或 LoRA 不适用于当前服务，调用会失败。可以清除不适用的值，或切回支持它们的服务。</p><button type="button" class="button secondary" id="cp-image-clear">清除不适用的图像配置</button></div></div><button type="button" class="button secondary" data-cp-grant="generate_image">授权图片生成</button><p class="field-hint">授权后模型可以按请求生成或修改图片。结果在工作台预览与下载。</p></section>`+
+ return `<section class="cp-feature"><h4>收到图片时</h4>${check('cp.media.understand_images','理解收到的照片',media.understand_images)}<div id="cp-vision-options">${select('cp.media.vision_provider_id','图片理解模型连接',options('providers',null,'沿用当前聊天模型'),media.vision_provider_id||'')}<p class="field-hint">需要支持图片输入的模型；聊天模型不支持时，单独选择视觉模型。适用于微信收图和测试台上传，不控制图片生成。</p></div></section>`+
+ `<section class="cp-feature"><h4>生成与修改图片</h4>${select('cp.media.image_service_id','图像生成服务',options('services','image'),media.image_service_id||'')}<p class="field-hint" id="cp-image-status" role="status"></p><div id="cp-image-options">${area('cp.media.image_prompt','形象补充提示词（可选）',media.image_prompt||'')}<details class="cp-advanced" id="cp-image-reference"><summary>固定角色参考图（高级）</summary>${field('cp.media.reference_media_id','角色参考图 ID',media.reference_media_id||'')}<p class="field-hint">填写本工作台已有图片的 ID。一般图生图直接使用本轮收到或上传的图片，无需填写。</p></details><div id="cp-image-lora">${formGrid(field('cp.media.lora','LoRA 名称或地址',media.lora||'')+field('cp.media.lora_scale','LoRA 权重',media.lora_scale??.8,'number','min="0" max="2" step="0.1"'))}<p class="field-hint">仅图像 HTTP 网关支持，名称与权重由你的网关解释。</p></div><div id="cp-image-incompatible" class="cp-notice" hidden><p>保存的参考图或 LoRA 不适用于当前服务，调用会失败。可以清除不适用的值，或切回支持它们的服务。</p><button type="button" class="button secondary" id="cp-image-clear">清除不适用的图像配置</button></div></div><button type="button" class="button secondary" data-cp-grant="generate_image">授权图片生成</button><p class="field-hint">授权后可按请求生成或修改图片。自动回复时直接发回原微信会话，测试台仅预览下载。</p></section>`+
  `<details class="cp-advanced" id="cp-file-voice"><summary>音频文件生成（高级）<span>用于面板试听与下载</span></summary><p class="field-hint">这是独立的音频文件工具。微信原生语音使用上面的联系人设置，MiniMax 无需在这里重复填写。</p>${select('cp.media.tts_service_id','音频文件服务',options('services','tts'),media.tts_service_id||'')}${formGrid(field('cp.media.voice_id','文件合成音色 ID',media.voice_id||'')+field('cp.media.voice_speed','文件合成语速',media.voice_speed??1,'number','min="0.5" max="2" step="0.1"'))}${check('cp.media.auto_voice','回复后额外生成音频文件',media.auto_voice)}<p class="field-hint">原生语音回复开启时不会重复自动生成文件。模型主动调用文件合成还需要授权 speak 工具。</p></details>`;
 }
 
@@ -41,12 +40,14 @@ export function agentFields(c={}){
  group('01 · 三层长期记忆','近期对话 → 摘要 → 用户事实',check('cp.memory.enabled','启用长期记忆',m.enabled)+check('cp.memory.auto_extract','自动提取明确事实并更新摘要',m.auto_extract!==false)+check('cp.memory.store_sensitive','允许保存用户主动提供的敏感事实',m.store_sensitive)+select('cp.memory.service_id','外部记忆连接',options('services','memory'),m.service_id||'')+`<p class="field-hint">每个 Agent 与每位联系人各有独立记忆。切回时恢复该组合的记忆；切换前最多带入 4 条背景，每条最多 300 字，不沿用旧角色风格。留空使用本机加密记忆和关键词检索。Qdrant 使用语义向量检索；其他框架可接入记忆网关。记忆管理支持修改和遗忘。</p>`+formGrid(field('cp.memory.recent_messages','近期消息条数',m.recent_messages||20,'number','min="2" max="60"')+field('cp.memory.retrieve_limit','每次检索记忆条数',m.retrieve_limit||6,'number','min="1" max="20"')+field('cp.memory.retention_days','普通记忆保留天数',m.retention_days||180,'number','min="1" max="3650"')))+
  group('02 · 主动关怀','早安晚安、约定与事件跟进',check('cp.care.enabled','允许创建主动关怀任务',care.enabled)+formGrid(field('cp.care.timezone','关怀时区',care.timezone||'Asia/Shanghai')+field('cp.care.daily_limit','每日关怀上限',care.daily_limit||3,'number','min="1" max="12"')+field('cp.care.quiet_start','免打扰开始',care.quiet_start||'23:00','time')+field('cp.care.quiet_end','免打扰结束',care.quiet_end||'08:00','time')+field('cp.care.min_gap_minutes','最小间隔（分钟）',care.min_gap_minutes||120,'number','min="5" max="1440"'))+`<p class="field-hint">还需要在用户档案中开启该联系人的主动关怀，并添加日程。暂停或更换 Agent 后不会继续发送旧任务。</p>`)+
  group('03 · 声音与视觉','微信语音、照片理解与图片生成',mediaFields(media))+
+ agentVoiceFields(c.voice,esc)+
  group('04 · 联网与生活工具','调用时机、新闻技能与生活查询',networkFields(c))+
  group('05 · 情绪、安全与隐私','现实支持与可追踪的运行记录',check('cp.safety.emotion_enabled','分析情绪并调整回复方式',s.emotion_enabled!==false)+check('cp.safety.crisis_detection','出现紧急自伤信号时优先提供安全关怀',s.crisis_detection!==false)+check('cp.safety.require_adult','亲密关系设定需要确认成年',s.require_adult!==false)+select('cp.safety.observability_service_id','外部观测服务',options('services','observability'),s.observability_service_id||'')+check('cp.safety.export_content','允许向观测服务传输对话正文',s.export_content)+`<p class="field-hint">默认仅传运行指标。记忆、密钥和运行上下文在本机加密；微信聊天原始记录仍保存在本地数据库。情绪标签不是医学诊断。</p>`);
 }
 
 export function bindAgentFields(){
  const form=$('ai-editor-form'),field=name=>form.elements.namedItem(name);
+ const cleanVoice=bindAgentVoice(form);
  const checked=(name,id)=>[...form.querySelectorAll(`input[name="${name}"]`)].some(el=>el.value===id&&el.checked);
  const toolState=names=>names.map(name=>{
    const choices=(library.tools||[]).filter(t=>t.builtin===name&&t.kind==='builtin');
@@ -60,7 +61,7 @@ export function bindAgentFields(){
    form.dispatchEvent(new Event('change',{bubbles:true}));
  };
  const life=[['weather','按需查天气','城市天气与未来预报，无需搜索连接器'],['music_search','音乐链接','查找网易云、Spotify 等音乐资料'],['places_search','餐厅与地点','通过网页查找地点资料'],['movie_search','电影资料','查询简介、评分与推荐来源']];
- $('cp-life-tools').innerHTML=life.map(([name,title,description])=>`<div class="cp-tool-row"><div><strong>${title}</strong><p>${description}</p><small data-cp-tool-status="${name}"></small></div><button type="button" class="button secondary" data-cp-grant="${name}">授权工具</button></div>`).join('');
+ // Life tools are selected in the categorized tool list; no second set of switches.
  const render=()=>{
    $('cp-vision-options').hidden=!field('cp.media.understand_images').checked;
    const image=selectedService('image'),driver=image?.driver,hasImage=!!field('cp.media.image_service_id').value;
@@ -73,22 +74,13 @@ export function bindAgentFields(){
    const searchReady=!!search?.enabled;
    const searchTools=toolState(['web_search','read_web']);
    $('cp-search-status').textContent=(off?'当前已关闭联网检索。':'')+(!searchReady?'搜索连接器未选择或已停用。':`当前使用：${search.name}。`)+(searchTools.every(t=>t.bound)?'搜索与原文读取已授权，调用遵守工具审批策略。':'搜索与原文读取尚未全部授权。');
-   const skill=newsSkill(),bound=!!skill&&checked('skills_ids',skill.id),newsTool=toolState(['news_collect'])[0];
-   $('cp-news-status').textContent=(off?'联网关闭，新闻采集不会运行。':'')+(!skill?'尚未安装或启用 news-aggregator-skill，请先在扩展中心添加。':!bound?'原生新闻技能尚未绑定此 Agent。':!newsTool.bound?'技能已绑定，还需授权新闻采集工具。':'原生新闻技能与采集工具已绑定；按实际采集结果汇总，不使用旧版新闻适配。');
-   $('cp-news-legacy').hidden=bound;
-   const newsButton=form.querySelector('[data-cp-news]');
-   newsButton.disabled=!skill||!newsTool.tool||(bound&&newsTool.bound);newsButton.textContent=bound&&newsTool.bound?'原生新闻已配置':'启用原生新闻技能';
-   for(const [name] of life){
-     const state=toolState([name])[0];
-     form.querySelector(`[data-cp-tool-status="${name}"]`).textContent=!state.tool?'工具未安装或已停用':!state.bound?'未授权':off?'已授权 · 联网检索关闭':name!=='weather'&&!searchReady?'已授权 · 缺少可用搜索连接器':'已授权 · 按需调用';
-   }
+   const skill=newsSkill();$('cp-news-legacy').hidden=!!skill&&checked('skills_ids',skill.id);
    for(const button of form.querySelectorAll('[data-cp-grant]')){
      const states=toolState(button.dataset.cpGrant.split(','));
      button.disabled=states.every(t=>t.bound)||states.some(t=>!t.tool);
      if(states.length===1)button.textContent=states[0].bound?'已授权':states[0].name==='generate_image'?'授权图片生成':'授权工具';
    }
  };
- $('cp-minimax-open').onclick=openVoiceSettings;
  $('cp-image-clear').onclick=()=>{
    const driver=selectedService('image')?.driver;
    if(!['codex_image','image_http'].includes(driver))field('cp.media.reference_media_id').value='';
@@ -96,12 +88,11 @@ export function bindAgentFields(){
    form.dispatchEvent(new Event('change',{bubbles:true}));
  };
  const click=e=>{
-   const button=e.target.closest('[data-cp-grant],[data-cp-news]');if(!button||button.disabled)return;
-   if(button.hasAttribute('data-cp-news'))grant(['news_collect'],newsSkill());
-   else grant(button.dataset.cpGrant.split(','));
+   const button=e.target.closest('[data-cp-grant]');if(!button||button.disabled)return;
+   grant(button.dataset.cpGrant.split(','));
  };
  form.addEventListener('click',click);form.addEventListener('change',render);render();
- return ()=>{form.removeEventListener('click',click);form.removeEventListener('change',render);};
+ return ()=>{cleanVoice();form.removeEventListener('click',click);form.removeEventListener('change',render);};
 }
 
 export function readAgentFields(form){
@@ -134,30 +125,35 @@ export function bindServiceFields(){
 }
 export function readService(form){const get=k=>form.get(k)||'',codex=get('driver')==='codex_image';return {category:get('category'),driver:get('driver'),url:codex?'':get('url'),model:codex?'':get('model'),api_key:codex?null:get('api_key')||null,clear_secret:codex||form.has('clear_secret'),voice_id:get('voice_id'),public_key:get('public_key'),collection:get('collection'),timeout:Number(get('timeout')),embedding_provider_id:get('embedding_provider_id'),enabled:form.has('enabled')};}
 
-export function renderExtraTab(tab){
+export function renderExtraTab(tab,agentId=''){
+ const viewKey=tab+':'+agentId;
  if(!['memory','schedules'].includes(tab)){activeTab='';return false;}
- if(activeTab===tab)return true;activeTab=tab;
+ if(activeTab===viewKey)return true;activeTab=viewKey;
+ ownerId=agentId;selection={agent_id:ownerId,contact_id:''};
  $('ai-library').className='companion-workspace';
  if(tab==='memory')renderMemory();else renderSchedules();return true;
 }
 
-function selectors(){return formGrid(select('agent_id','记忆所属 Agent',options('agents').filter(x=>x[0]),selection.agent_id)+select('contact_id','记忆所属用户',[['','测试台会话'],...ctx.state.contacts.map(c=>[c.id,c.lookup])],selection.contact_id));}
+function selectors(){return formGrid(select('agent_id','记忆所属 Agent',options('agents').filter(x=>x[0]===ownerId),ownerId)+select('contact_id','记忆所属用户',[['','测试台会话'],...ctx.state.contacts.map(c=>[c.id,c.lookup])],selection.contact_id));}
 async function renderMemory(){
- selection.agent_id=selection.agent_id||library.agents[0]?.id||'';
- $('ai-library').innerHTML=`<div class="companion-banner"><span>MEMORY GARDEN</span><h3>记住重要的事，也允许忘记</h3><p>这里的每一条记忆只属于所选 Agent 与用户。</p></div><form id="memory-select">${selectors()}<button class="button secondary">读取记忆与档案</button></form><div id="memory-content"></div>`;
- $('memory-select').onsubmit=async e=>{e.preventDefault();selection=Object.fromEntries(new FormData(e.target));await loadMemory();};
+ selection.agent_id=ownerId;
+ $('ai-library').innerHTML=`<div class="companion-banner"><span>MEMORY GARDEN</span><h3>记住重要的事，也允许忘记</h3><p>这里的每一条记忆只属于当前 Agent 与对应用户；测试台会话与微信联系人分开保存。</p></div><form id="memory-select">${selectors()}<button class="button secondary">读取记忆与档案</button></form><div id="memory-content"></div>`;
+ $('memory-select').onsubmit=async e=>{e.preventDefault();selection={agent_id:ownerId,contact_id:new FormData(e.target).get('contact_id')||''};await loadMemory();};
  await loadMemory();
 }
 async function loadMemory(){
+ const host=$('memory-content'),request=++memoryRequest;
+ if(!host)return;host.textContent='正在读取此用户的记忆…';
  if(!selection.agent_id){$('memory-content').textContent='先创建一位 Agent。';return;}
  try{
  const scope=scopeFor(selection.agent_id,selection.contact_id),data=await ctx.api('/api/ai/companion?'+new URLSearchParams(scope)),p=data.profile;
- $('memory-content').innerHTML=`<form id="companion-profile">${group('用户档案','只填写用户明确提供的信息',formGrid(field('display_name','用户名称',p.display_name)+select('age_status','用户年龄声明',[['unknown','未确认 · 普通陪伴'],['adult','已自我声明成年'],['minor','未成年 · 普通陪伴']],p.age_status)+field('preferred_name','喜欢的称呼',p.preferred_name)+field('city','所在城市（可选）',p.city)+field('birthday','生日（可选）',p.birthday)+field('relationship_start','关系起始日期（可选）',p.relationship_start,'date')+select('closeness','亲密度',[['初识','初识'],['熟悉','熟悉'],['亲密','亲密']],p.closeness))+check('memory_consent','允许此用户保存长期记忆',p.memory_consent)+check('care_consent','允许此联系人接收主动关怀',p.care_consent)+`<button class="button primary">保存用户档案</button>`,true)}</form><div class="companion-summary"><h4>近期摘要</h4><p>${esc(data.summary||'对话后自动整理，尚无摘要。')}</p><small>近期情绪：${esc(data.mood||'尚未分析')}</small></div><div class="companion-memory-actions"><button class="button secondary" id="add-memory">添加记忆</button><button class="text-button" id="preview-prompt">预览实际提示词</button><button class="text-button ai-delete" id="forget-all">遗忘此用户全部记忆</button></div><div class="memory-cards">${data.memories.map(m=>`<article class="memory-card"><span class="pill">${esc({fact:'事实',preference:'喜好',event:'事件',worry:'烦恼',summary:'摘要'}[m.category])}${m.pinned?' · 长期保留':''}</span><h4>${esc(m.key)}</h4><p>${esc(m.content)}</p><small>${m.pinned?'不自动过期':'到期 '+new Date(m.expires_at).toLocaleDateString('zh-CN')}</small><div><button class="text-button" data-memory-edit="${m.id}">编辑</button><button class="text-button" data-memory-forget="${m.id}">遗忘</button></div></article>`).join('')||'<p class="field-hint">还没有记忆。可以先在测试台聊聊喜好、生日或最近的计划。</p>'}</div><pre id="prompt-preview" hidden></pre>`;
+ if(request!==memoryRequest||host!==$('memory-content'))return;
+ host.innerHTML=`<form id="companion-profile">${group('用户档案','只填写用户明确提供的信息',formGrid(field('display_name','用户名称',p.display_name)+select('age_status','用户年龄声明',[['unknown','未确认 · 普通陪伴'],['adult','已自我声明成年'],['minor','未成年 · 普通陪伴']],p.age_status)+field('preferred_name','喜欢的称呼',p.preferred_name)+field('city','所在城市（可选）',p.city)+field('birthday','生日（可选）',p.birthday)+field('relationship_start','关系起始日期（可选）',p.relationship_start,'date')+select('closeness','亲密度',[['初识','初识'],['熟悉','熟悉'],['亲密','亲密']],p.closeness))+check('memory_consent','允许此用户保存长期记忆',p.memory_consent)+check('care_consent','允许此联系人接收主动关怀',p.care_consent)+`<button class="button primary">保存用户档案</button>`,true)}</form><div class="companion-summary"><h4>近期摘要</h4><p>${esc(data.summary||'对话后自动整理，尚无摘要。')}</p><small>近期情绪：${esc(data.mood||'尚未分析')}</small></div><div class="companion-memory-actions"><button class="button secondary" id="add-memory">添加记忆</button><button class="text-button" id="preview-prompt">预览实际提示词</button><button class="text-button ai-delete" id="forget-all">遗忘此用户全部记忆</button></div><div class="memory-cards">${data.memories.map(m=>`<article class="memory-card"><span class="pill">${esc({fact:'事实',preference:'喜好',event:'事件',worry:'烦恼',summary:'摘要'}[m.category])}${m.pinned?' · 长期保留':''}</span><h4>${esc(m.key)}</h4><p>${esc(m.content)}</p><small>${m.pinned?'不自动过期':'到期 '+new Date(m.expires_at).toLocaleDateString('zh-CN')}</small><div><button class="text-button" data-memory-edit="${m.id}">编辑</button><button class="text-button" data-memory-forget="${m.id}">遗忘</button></div></article>`).join('')||'<p class="field-hint">还没有记忆。可以先在测试台聊聊喜好、生日或最近的计划。</p>'}</div><pre id="prompt-preview" hidden></pre>`;
  $('companion-profile').onsubmit=async e=>{e.preventDefault();try{const f=new FormData(e.target),profile=Object.fromEntries(f);profile.memory_consent=f.has('memory_consent');profile.care_consent=f.has('care_consent');await ctx.api('/api/ai/companion/profile',{method:'PUT',body:{...scope,profile}});ctx.toast('用户档案已保存');}catch(e){ctx.toast(e.message,true);}};
  const forget=async id=>{if(!confirm(id?'遗忘这条记忆，同时清理摘要及旧上下文，防止它再次出现？':'遗忘此用户全部记忆、摘要和测试对话？'))return;try{await ctx.api('/api/ai/companion/forget',{method:'POST',body:{...scope,memory_id:id}});await loadMemory();}catch(e){ctx.toast(e.message,true);}};
  $('forget-all').onclick=()=>forget(null);$('add-memory').onclick=()=>memoryEditor(scope);
  $('memory-content').onclick=e=>{const b=e.target.closest('button');if(b?.dataset.memoryForget)forget(b.dataset.memoryForget);if(b?.dataset.memoryEdit)memoryEditor(scope,data.memories.find(m=>m.id===b.dataset.memoryEdit));};
- $('preview-prompt').onclick=async()=>{const r=await ctx.api('/api/ai/companion/prompt',{method:'POST',body:scope});$('prompt-preview').textContent=r.prompt;$('prompt-preview').hidden=false;};
+ $('preview-prompt').onclick=async()=>{const r=await ctx.api('/api/ai/companion/prompt',{method:'POST',body:scope});if(request!==memoryRequest||host!==$('memory-content'))return;$('prompt-preview').textContent=r.prompt;$('prompt-preview').hidden=false;};
  }catch(error){ctx.toast(error.message,true);}
 }
 function modal(title,html,submit){
@@ -166,11 +162,12 @@ function modal(title,html,submit){
 function memoryEditor(scope,m={}){modal('编辑记忆',field('key','记忆字段',m.key||'')+select('category','记忆类别',[['fact','事实'],['preference','喜好'],['event','事件'],['worry','烦恼']],m.category||'fact')+area('content','记忆内容',m.content||'')+check('pinned','长期保留（不自动过期）',m.pinned),async f=>{await ctx.api('/api/ai/companion/memories',{method:'POST',body:{...scope,memory_id:m.id,memory:{key:f.get('key'),category:f.get('category'),content:f.get('content'),pinned:f.has('pinned')}}});await loadMemory();});}
 
 async function renderSchedules(){
- renderAgentSchedules(ctx,library,renderCareSchedules);
+ renderAgentSchedules(ctx,library,renderCareSchedules,ownerId);
 }
 async function renderCareSchedules(){
- try{const rows=await ctx.api('/api/ai/schedules');const host=$('care-schedule-content');if(!host)return;host.innerHTML=`<div class="companion-banner"><span>GENTLE ROUTINES</span><h3>在合适的时候，想起你</h3><p>关怀按时区执行，遵守免打扰时间。服务关闭或暂停期间的旧任务不会集中补发。</p></div><button class="button primary" id="new-care">添加关怀日程</button><div class="care-list">${rows.map(s=>`<article class="care-card"><div><span class="pill ${s.enabled?'green':''}">${s.enabled?'已启用':'已停用'}</span><h4>${esc(s.title)}</h4><p>${esc(s.instruction)}</p><small>${esc(ctx.state.contacts.find(c=>c.id===s.contact_id)?.lookup||'联系人已移除')} · ${esc(s.kind==='cron'?s.cron:s.at)} · ${esc(s.timezone)} · ${s.delivery==='auto'?'按会话模式发送':'先生成草稿'}</small><p>${esc(s.last_status)}${s.next_at?' · 下次 '+new Date(s.next_at).toLocaleString('zh-CN'):''}</p></div><div><button class="text-button" data-care-edit="${s.id}">编辑</button><button class="text-button ai-delete" data-care-delete="${s.id}">删除</button></div></article>`).join('')||'<p class="field-hint">可以添加早安、晚安，或某次面试后的关心。</p>'}</div>`;
+ const host=$('care-schedule-content'),scopeOwner=ownerId;
+ try{const all=await ctx.api('/api/ai/schedules');if(!host||host!==$('care-schedule-content')||scopeOwner!==ownerId)return;const rows=all.filter(s=>s.agent_id===scopeOwner);host.innerHTML=`<div class="companion-banner"><span>GENTLE ROUTINES</span><h3>在合适的时候，想起你</h3><p>关怀按时区执行，遵守免打扰时间。服务关闭或暂停期间的旧任务不会集中补发。</p></div><button class="button primary" id="new-care">添加关怀日程</button><div class="care-list">${rows.map(s=>`<article class="care-card"><div><span class="pill ${s.enabled?'green':''}">${s.enabled?'已启用':'已停用'}</span><h4>${esc(s.title)}</h4><p>${esc(s.instruction)}</p><small>${esc(ctx.state.contacts.find(c=>c.id===s.contact_id)?.lookup||'联系人已移除')} · ${esc(s.kind==='cron'?s.cron:s.at)} · ${esc(s.timezone)} · ${s.delivery==='auto'?'按会话模式发送':'先生成草稿'}</small><p>${esc(s.last_status)}${s.next_at?' · 下次 '+new Date(s.next_at).toLocaleString('zh-CN'):''}</p></div><div><button class="text-button" data-care-edit="${s.id}">编辑</button><button class="text-button ai-delete" data-care-delete="${s.id}">删除</button></div></article>`).join('')||'<p class="field-hint">可以添加早安、晚安，或某次面试后的关心。</p>'}</div>`;
  $('new-care').onclick=()=>scheduleEditor();host.onclick=async e=>{const b=e.target.closest('button');try{if(b?.dataset.careEdit)scheduleEditor(rows.find(x=>x.id===b.dataset.careEdit));if(b?.dataset.careDelete&&confirm('删除这个关怀日程？')){await ctx.api('/api/ai/schedules/'+b.dataset.careDelete,{method:'DELETE'});await renderCareSchedules();}}catch(error){ctx.toast(error.message,true);}};
  }catch(e){ctx.toast(e.message,true);}
 }
-function scheduleEditor(s={}){const defaultDate=new Date(Date.now()+3600000);defaultDate.setMinutes(defaultDate.getMinutes()-defaultDate.getTimezoneOffset());const html=field('title','日程名称',s.title||'早安问候')+formGrid(select('agent_id','关怀 Agent',options('agents').filter(x=>x[0]),s.agent_id||library.agents[0]?.id)+select('contact_id','接收联系人',ctx.state.contacts.map(c=>[c.id,c.lookup]),s.contact_id||ctx.state.contacts[0]?.id))+select('kind','执行方式',[['once','仅一次'],['cron','Cron 重复执行']],s.kind||'once')+formGrid(field('at','执行日期时间（一次性）',s.at?s.at.slice(0,16):defaultDate.toISOString().slice(0,16),'datetime-local')+field('cron','Cron 表达式（重复）',s.cron||'0 9 * * *')+field('timezone','执行时区',s.timezone||'Asia/Shanghai'))+`<p class="field-hint">Cron 五段：分 时 日 月 星期。每天早上 9 点：0 9 * * *；每天晚 10 点：0 22 * * *。</p>`+area('instruction','她要关心的事情',s.instruction||'用自然、简短的语气说早安，不强求用户回复。')+select('delivery','发送方式',[['draft','生成草稿，在面板确认'],['auto','按会话模式自动发送']],s.delivery||'draft')+check('enabled','启用日程',s.enabled)+`<p class="field-hint">实际执行还需联系人已绑定该 Agent、开启监听及 AI 模式，并在用户档案同意主动关怀。</p>`;modal('关怀日程',html,async f=>{const body=Object.fromEntries(f);body.enabled=f.has('enabled');await ctx.api('/api/ai/schedules'+(s.id?'/'+s.id:''),{method:s.id?'PUT':'POST',body});await renderCareSchedules();});}
+function scheduleEditor(s={}){const scopeOwner=ownerId;const defaultDate=new Date(Date.now()+3600000);defaultDate.setMinutes(defaultDate.getMinutes()-defaultDate.getTimezoneOffset());const html=field('title','日程名称',s.title||'早安问候')+formGrid(select('agent_id','关怀 Agent',options('agents').filter(x=>x[0]===scopeOwner),scopeOwner)+select('contact_id','接收联系人',ctx.state.contacts.map(c=>[c.id,c.lookup]),s.contact_id||ctx.state.contacts[0]?.id))+select('kind','执行方式',[['once','仅一次'],['cron','Cron 重复执行']],s.kind||'once')+formGrid(field('at','执行日期时间（一次性）',s.at?s.at.slice(0,16):defaultDate.toISOString().slice(0,16),'datetime-local')+field('cron','Cron 表达式（重复）',s.cron||'0 9 * * *')+field('timezone','执行时区',s.timezone||'Asia/Shanghai'))+`<p class="field-hint">Cron 五段：分 时 日 月 星期。每天早上 9 点：0 9 * * *；每天晚 10 点：0 22 * * *。</p>`+area('instruction','她要关心的事情',s.instruction||'用自然、简短的语气说早安，不强求用户回复。')+select('delivery','发送方式',[['draft','生成草稿，在面板确认'],['auto','按会话模式自动发送']],s.delivery||'draft')+check('enabled','启用日程',s.enabled)+`<p class="field-hint">实际执行还需联系人已绑定该 Agent、开启监听及 AI 模式，并在用户档案同意主动关怀。</p>`;modal('关怀日程',html,async f=>{const body=Object.fromEntries(f);body.agent_id=scopeOwner;body.enabled=f.has('enabled');await ctx.api('/api/ai/schedules'+(s.id?'/'+s.id:''),{method:s.id?'PUT':'POST',body});await renderCareSchedules();});}

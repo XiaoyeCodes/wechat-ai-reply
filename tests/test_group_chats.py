@@ -66,6 +66,75 @@ class GroupNode:
         return [item for child in self.children for item in [child, *child.descendants()]]
 
 
+@pytest.mark.parametrize('initially_open', [True, False])
+@pytest.mark.parametrize('panel_id,panel_class', [
+    ('', 'mmui::ChatRoomMemberInfoView'), ('group_chat_info_view', 'mmui::XView'),
+])
+def test_group_inspection_reads_complete_settings_grid_without_member_picker(
+        monkeypatch, initially_open, panel_id, panel_class):
+    from wechat_panel import group_bridge
+    members = ['本人', 'Aria', '另一位成员']
+    panel = GroupNode(kind='Group', aid=panel_id, cls=panel_class, visible=initially_open,
+        children=[GroupNode(name, kind='ListItem', cls='mmui::ChatMemberCell') for name in members])
+    window = GroupNode(children=[panel])
+    window.child_window = lambda **kwargs: object()
+    actions = []
+
+    def click(button, contact, action):
+        actions.append(action)
+        panel.visible = not panel.visible
+
+    bridge = SimpleNamespace(
+        _ensure_account=lambda expected: 'self', _search_unique=lambda *args, **kwargs: None,
+        _find_dialog=lambda target: window, _title=lambda win: '测试群',
+        Tools=SimpleNamespace(is_group_chat=lambda win: True),
+        Buttons=SimpleNamespace(ChatInfoButton={}), _check_account=lambda target: None,
+        _focus=lambda *args: None, _click=click, _record=lambda *args, **kwargs: None,
+        profiles={}, verified_contacts=set(), group_rosters={})
+    monkeypatch.setattr(group_bridge, 'group_total', lambda *args: 3)
+    monkeypatch.setattr(group_bridge, 'read_member_list',
+        lambda *args: pytest.fail('a complete settings grid must not open the member picker'))
+    profile = group_bridge.inspect_group(bridge, '测试群', ['Aria'], '本人')
+    assert profile['group_members_verified'] and profile['group_member_count'] == 3
+    assert bridge.group_rosters[('self', profile['wechat_id'])] == members
+    assert panel.visible == initially_open
+    assert actions == ([] if initially_open else ['ui.group.info.open', 'ui.group.info.close'])
+
+
+def test_group_panel_detection_rejects_multiple_visible_panels_and_ignores_hidden_ones():
+    from wechat_panel.group_bridge import group_info_panel, GroupEvidenceError
+    hidden = GroupNode(kind='Group', cls='mmui::ChatRoomMemberInfoView', visible=False)
+    visible = GroupNode(kind='Group', cls='mmui::ChatRoomMemberInfoView')
+    assert group_info_panel(GroupNode(children=[hidden, visible])) is visible
+    with pytest.raises(GroupEvidenceError, match='不唯一'):
+        group_info_panel(GroupNode(children=[visible,
+            GroupNode(kind='Group', cls='mmui::ChatRoomMemberInfoView')]))
+
+
+@pytest.mark.parametrize('total', [None, 0, 2, 4])
+def test_group_grid_does_not_accept_a_missing_or_mismatched_member_count(total):
+    from wechat_panel.group_bridge import roster
+    panel = GroupNode(children=[GroupNode(name, cls='mmui::ChatMemberCell')
+                               for name in ['本人', 'Aria', '另一位成员']])
+    assert not roster(panel, total)[1]
+
+
+def test_group_member_picker_reads_named_rows_without_keyboard_focus():
+    from wechat_panel.group_bridge import member_list_roster, selected_members
+    rows = [GroupNode(name, kind='ListItem', cls='mmui::XTableCell')
+            for name in ['', 'Aria', '', '另一位成员', '', '本人', '']]
+    listing = SimpleNamespace(children=lambda **kwargs: rows)
+    names, complete = member_list_roster(listing, 3)
+    assert names == ['Aria', '另一位成员', '本人'] and complete
+    assert selected_members(names, complete, ['Aria'])
+    assert not member_list_roster(listing, 4)[1]
+    rows[-1] = GroupNode('Aria', kind='ListItem', cls='mmui::XTableCell')
+    names, complete = member_list_roster(listing, 4)
+    assert complete and not selected_members(names, complete, ['Aria'])
+    rows[-1].visible = False
+    assert not member_list_roster(listing, 4)[1]
+
+
 def observed_row(body, *, sender='张三', children=(), row_kind='ListItem', row_class='mmui::chattextitemview'):
     from wechat_panel.group_bridge import observe_group_row
     contact = {'chat_type': 'group', 'group_self_name': '机器人', 'group_self_name_verified': True}

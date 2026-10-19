@@ -9,7 +9,9 @@
   <link rel="stylesheet" href="/assets/app.css">
   <link rel="stylesheet" href="/assets/voice-settings.css?v=1">
   <link rel="stylesheet" href="/assets/ai.css?v=workspace-1">
-  <script src="/assets/app.js?v=groups-1" type="module"></script>
+  <link rel="stylesheet" href="/assets/api-settings.css?v=1">
+  <link rel="stylesheet" href="/assets/agent-categories.css?v=skill-check-1">
+  <script src="/assets/app.js?v=api-settings-1" type="module"></script>
 <link rel="stylesheet" href="/assets/companion.css">
   <link rel="stylesheet" href="/assets/agent-schedules.css?v=1">
   <link rel="stylesheet" href="/assets/groups.css?v=1">
@@ -26,7 +28,7 @@
         <button class="nav-item" data-view="agent" aria-label="Agent 接口"><span data-icon="panel"></span><span>接口</span></button>
       </nav>
       <div class="rail-bottom">
-        <button class="nav-item" id="ai-global-settings" aria-label="设置"><span data-icon="panel"></span><span>设置</span></button>
+        <button class="nav-item" id="ai-global-settings" data-view="settings" aria-label="设置"><span data-icon="panel"></span><span>设置</span></button>
         <button class="nav-item" data-view="status" aria-label="运行状态"><span data-icon="activity"></span><span>状态</span></button>
         <div class="local-avatar" title="本机工作空间">本机</div>
       </div>
@@ -87,7 +89,7 @@
             <p class="inline-error" id="listener-error" hidden></p>
             <label class="field-label" for="conversation-mode">会话模式</label><select id="conversation-mode"><option value="manual">人工聊天</option><option value="listen_only">仅监听</option><option value="ai_assist">AI 辅助回复</option><option value="ai_auto">AI 自动回复</option></select>
             <p class="field-hint" id="ai-mode-hint">人工聊天可在工作台回复；仅监听保留消息，不发送回复。</p>
-            <label class="field-label" for="reply-format">Agent 回复形式</label><select id="reply-format"><option value="text">文字回复</option><option value="voice">语音回复</option></select>
+            <label class="field-label" for="reply-format">Agent 回复形式</label><select id="reply-format"><option value="agent">跟随 Agent</option><option value="text">文字回复</option><option value="voice">语音回复</option></select>
             <p class="field-hint" id="reply-format-hint">仅对当前联系人生效。也可以在微信说“以后用语音回复”或“改回文字回复”。</p>
             <section id="voice-studio" class="voice-studio" aria-label="声音与试听" hidden>
               <div class="voice-studio-heading"><h3>声音与试听</h3><span>独立音色</span></div>
@@ -126,10 +128,16 @@
       <main id="view-ai" class="page-view ai-center" hidden>
         <div class="ai-hero"><div><span class="eyebrow">RELAY INTELLIGENCE / 01</span><h2>为每一段对话，安排合适的 Agent。</h2><p>选择助手、启用所需能力，让每段对话各得其所。</p></div></div>
         <div class="ai-summary" id="ai-summary"></div>
-        <div class="ai-settings-bar"><span>每位联系人都有独立的对话与记忆。</span><button class="text-button" id="ai-workspace-settings" aria-pressed="false">设置</button></div>
-        <div class="ai-tabs" id="ai-tabs" role="tablist" aria-label="AI 工作空间"><button role="tab" data-ai-section="agents" aria-selected="true">我的 Agent</button><button role="tab" data-ai-section="extensions" aria-selected="false" tabindex="-1">扩展中心</button><button role="tab" data-ai-section="resources" aria-selected="false" tabindex="-1">资料与记忆</button><button role="tab" data-ai-section="schedules" aria-selected="false" tabindex="-1">自动任务</button><button role="tab" data-ai-section="runs" aria-selected="false" tabindex="-1">运行记录</button></div>
+        <div class="ai-settings-bar"><span>在这里配置 Agent、技能与知识；模型和服务密钥在设置中统一管理。</span><button class="text-button" id="ai-workspace-settings">模型与 API 设置 ↗</button></div>
+        <div class="ai-tabs" id="ai-tabs" role="tablist" aria-label="AI 工作空间"><button role="tab" data-ai-section="agents" aria-selected="true">我的 Agent</button><button role="tab" data-ai-section="extensions" aria-selected="false" tabindex="-1">扩展中心</button><button role="tab" data-ai-section="resources" aria-selected="false" tabindex="-1">知识库</button><button role="tab" data-ai-section="runs" aria-selected="false" tabindex="-1">运行记录</button></div>
         <div class="ai-subtabs" id="ai-subtabs" role="tablist" aria-label="分类" hidden></div>
-        <section class="ai-library" aria-label="AI 资源"><div class="ai-section-heading"><div><h3 id="ai-section-title">我的 Agent</h3><p id="ai-section-description"></p></div><div class="companion-heading-actions"><button class="button primary" id="ai-create">新建 Agent</button></div></div><div id="ai-library"></div></section>
+        <div id="ai-agent-context" class="ai-agent-context" hidden></div>
+        <div id="ai-resource-host"><section id="ai-resource-panel" class="ai-library" aria-label="配置资源"><div class="ai-section-heading"><div><h3 id="ai-section-title">我的 Agent</h3><p id="ai-section-description"></p></div><div class="companion-heading-actions"><button class="button primary" id="ai-create">新建 Agent</button></div></div><div id="ai-library"></div><section id="api-platforms" class="api-catalog" aria-label="模型平台与 API 申请入口" hidden></section></section></div>
+      </main>
+      <main id="view-settings" class="page-view ai-center api-settings" hidden>
+        <div class="api-settings-hero"><div><span class="eyebrow">SETTINGS / CONNECTIONS</span><h2>模型与 API 设置</h2><p>管理模型连接、服务密钥与官方申请入口。配置完成后，在 AI 中心为各个 Agent 选择使用。</p></div><div class="api-settings-note"><strong>密钥在本机加密保存</strong><span>编辑时留空即可保留原密钥</span></div></div>
+        <div class="ai-tabs" id="settings-tabs" role="tablist" aria-label="设置分类"><button type="button" role="tab" data-ai-tab="providers" aria-selected="true">模型与 API</button><button type="button" role="tab" data-ai-tab="services" aria-selected="false" tabindex="-1">服务配置</button><button type="button" role="tab" data-ai-tab="mcp" aria-selected="false" tabindex="-1">MCP</button><button type="button" role="tab" data-ai-tab="preferences" aria-selected="false" tabindex="-1">回复设置</button></div>
+        <div id="settings-resource-host"></div>
       </main>
       <footer class="workspace-footer"><span>RELAY <b>·</b> 让对话有序发生</span><span id="footer-state">本机工作空间</span></footer>
     </div>

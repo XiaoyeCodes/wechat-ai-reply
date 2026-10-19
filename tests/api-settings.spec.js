@@ -1,0 +1,81 @@
+const {test,expect}=require('@playwright/test');
+const http=require('http');
+const headers={'X-Panel-Request':'1'};
+
+test('独立设置页：官方入口、平台配置、保留密钥、模型读取与页面归属',async({page,request})=>{
+  const calls=[],errors=[];let provider,agent;
+  const server=http.createServer(async(req,res)=>{
+    for await(const chunk of req){}
+    calls.push({path:req.url,authorization:req.headers.authorization});
+    res.setHeader('Content-Type','application/json');
+    res.end(JSON.stringify(req.url.endsWith('/models')?{data:[{id:'settings-model'}]}:{choices:[{message:{role:'assistant',content:'设置连接成功'}}]}));
+  });
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  page.on('pageerror',error=>errors.push(error.message));
+  try{
+    await page.goto('/');await page.getByRole('button',{name:'设置',exact:true}).click();
+    await expect(page.locator('#view-settings')).toBeVisible();await expect(page.locator('#view-ai')).toBeHidden();
+    await expect(page.locator('#ai-global-settings')).toHaveAttribute('aria-current','page');
+    await expect(page.locator('#page-title')).toHaveText('设置');
+    await expect(page.locator('#settings-tabs [role="tab"]')).toHaveText(['模型与 API','服务配置','MCP','回复设置']);
+    const platforms=page.locator('#api-platforms');
+    await expect(platforms.locator('[data-platform]')).toHaveCount(6);
+    const deepseek=platforms.locator('[data-platform="deepseek"]');
+    await expect(deepseek.getByRole('link',{name:'申请 / 管理 API Key ↗'})).toHaveAttribute('href','https://platform.deepseek.com/api_keys');
+    await expect(deepseek.getByRole('link',{name:'官方文档 ↗'})).toHaveAttribute('rel','noopener noreferrer');
+    await page.getByRole('button',{name:'添加 DeepSeek 连接',exact:true}).click();
+    const form=page.locator('#ai-editor-form');
+    await expect(form.getByLabel('接口地址（Base URL）')).toHaveValue('https://api.deepseek.com');
+    await expect(form.getByLabel('模型 ID',{exact:true})).toHaveValue('');
+    await form.getByLabel('API Key',{exact:true}).fill('temporary-platform-key');
+    await form.getByLabel('模型平台',{exact:true}).selectOption('qwen');
+    await expect(form.getByLabel('接口地址（Base URL）')).toHaveValue('');
+    await expect(form.getByLabel('API Key',{exact:true})).toHaveValue('');
+    await expect(page.locator('#provider-guide')).toContainText('工作空间');
+    await form.getByLabel('模型平台',{exact:true}).selectOption('custom');
+    await form.getByLabel('名称',{exact:true}).fill('设置页测试连接');
+    await form.getByLabel('接口地址（Base URL）').fill(`http://127.0.0.1:${server.address().port}/v1`);
+    await form.getByLabel('模型 ID',{exact:true}).fill('settings-model');
+    await form.getByLabel('API Key',{exact:true}).fill('settings-fixture-key');
+    await form.getByRole('button',{name:'保存配置',exact:true}).click();
+    await expect(page.locator('#ai-editor')).toBeHidden();
+    const bootstrap=await (await request.get('/api/ai/bootstrap')).json();
+    provider=bootstrap.providers.find(p=>p.name==='设置页测试连接');
+    expect(provider.key_configured).toBe(true);expect(JSON.stringify(provider)).not.toContain('settings-fixture-key');
+    const response=await request.post('/api/ai/config/agents',{headers,data:{name:'设置页绑定验证',provider_id:provider.id}});
+    expect(response.ok()).toBe(true);agent=await response.json();
+    const card=page.locator('[data-resource-kind="providers"]').filter({has:page.getByRole('heading',{name:'设置页测试连接',exact:true})});
+    await card.getByRole('button',{name:'测试连接',exact:true}).click();await expect(page.locator('#toast')).toContainText('设置连接成功');
+    await card.getByRole('button',{name:'编辑',exact:true}).click();
+    await expect(form.getByLabel('API Key',{exact:true})).toHaveValue('');
+    await form.getByRole('button',{name:'读取可用模型',exact:true}).click();
+    await expect(page.locator('#ai-model-options option')).toHaveAttribute('value','settings-model');
+    await form.getByRole('button',{name:'保存配置',exact:true}).click();await expect(page.locator('#ai-editor')).toBeHidden();
+    await card.getByRole('button',{name:'测试连接',exact:true}).click();await expect.poll(()=>calls.length).toBe(3);
+    expect(calls.every(c=>c.authorization==='Bearer settings-fixture-key')).toBe(true);
+    const after=await (await request.get('/api/ai/config/providers/'+provider.id)).json();
+    expect(after).toEqual(provider);
+    expect((await (await request.get('/api/ai/config/agents/'+agent.id)).json()).provider_id).toBe(provider.id);
+    await page.screenshot({path:test.info().outputPath('api-settings-desktop.png'),fullPage:true});
+    await page.getByRole('tab',{name:'服务配置',exact:true}).click();await expect(platforms).toBeHidden();
+    await page.getByRole('button',{name:'AI 中心',exact:true}).click();
+    await expect(page.locator('#view-settings')).toBeHidden();await expect(page.locator('#view-ai')).toBeVisible();
+    await expect(page.locator('#ai-tabs [role="tab"]')).toHaveText(['我的 Agent','扩展中心','知识库','运行记录']);
+    await expect(page.locator('#view-ai [data-resource-kind="providers"]')).toHaveCount(0);
+    await page.getByRole('button',{name:'设置',exact:true}).click();
+    await expect(page.getByRole('tab',{name:'服务配置',exact:true})).toHaveAttribute('aria-selected','true');
+    await page.getByRole('tab',{name:'模型与 API',exact:true}).click();
+    await page.getByRole('tab',{name:'模型与 API',exact:true}).focus();await page.keyboard.press('ArrowRight');
+    await expect(page.getByRole('tab',{name:'服务配置',exact:true})).toBeFocused();
+    await page.getByRole('tab',{name:'模型与 API',exact:true}).click();
+    await page.setViewportSize({width:390,height:844});
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBeTruthy();
+    await expect(deepseek).toBeVisible();
+    await page.screenshot({path:test.info().outputPath('api-settings-mobile.png'),fullPage:true});
+    expect(errors).toEqual([]);
+  }finally{
+    if(agent)await request.delete('/api/ai/config/agents/'+agent.id,{headers});
+    if(provider)await request.delete('/api/ai/config/providers/'+provider.id,{headers});
+    server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
+  }
+});

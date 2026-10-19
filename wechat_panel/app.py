@@ -56,7 +56,7 @@ class ContactPatch(StrictModel):
     listening: bool | None = None
     mode: Literal['manual', 'listen_only','ai_assist','ai_auto'] | None = None
     ai_agent_id: str | None = Field(default=None,max_length=100)
-    reply_format: Literal['text','voice'] | None = None
+    reply_format: Literal['agent','text','voice'] | None = None
     voice_preset: str | None = Field(default=None,max_length=300)
     voice_model: Literal['speech-2.8-turbo','speech-2.8-hd'] | None = None
     group_members: list[str] | None = Field(default=None,max_length=50)
@@ -148,11 +148,15 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
 
     @app.get('/api/bootstrap')
     def bootstrap():
-        return dict(contacts=app.state.store.contacts(), status=status(), cursor=app.state.store.latest_event())
+        return dict(contacts=contacts(), status=status(), cursor=app.state.store.latest_event())
+
+    def contact_voice(contact):
+        from .voice_reply import preferences
+        return contact|{'voice_settings':preferences(app.state.store,contact)}
 
     @app.get('/api/contacts')
     def contacts():
-        return app.state.store.contacts()
+        return [contact_voice(c) for c in app.state.store.contacts()]
 
     @app.get('/api/contacts/{contact_id}/avatar')
     def contact_avatar(contact_id: str, own: bool = False):
@@ -177,7 +181,7 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
         except sqlite3.IntegrityError:
             raise HTTPException(409, '该微信账号下已经添加过这个联系人') from None
         app.state.runtime.configure()
-        return contact
+        return contact_voice(contact)
 
     @app.patch('/api/contacts/{contact_id}')
     async def update_contact(contact_id: str, body: ContactPatch):
@@ -219,7 +223,7 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
             with app.state.ai.lock:app.state.ai.data.cancel_contact(contact_id,'会话模式、监听或 Agent 已切换')
         contact = app.state.store.update_contact(contact_id, **changes)
         app.state.runtime.configure()
-        return contact
+        return contact_voice(contact)
 
     @app.delete('/api/contacts/{contact_id}', status_code=204)
     def delete_contact(contact_id: str):

@@ -165,6 +165,9 @@ class AIStore:
             if value['kind']=='hermes' and value['hermes_contact_id']:
                 self.store.contact(value['hermes_contact_id'])
             c=value['companion']
+            if c['voice']['preset']!=old.get('companion',{}).get('voice',{}).get('preset'):
+                from .voice_synthesis import preset
+                preset(c['voice']['preset'],store=self.store)
             for sid,category in [(c['search_service_id'],'search'),(c['memory']['service_id'],'memory'),
                 (c['media']['tts_service_id'],'tts'),(c['media']['image_service_id'],'image'),(c['safety']['observability_service_id'],'observability')]:
                 if sid and self.get('services',sid)['category']!=category:raise ValueError('绑定的服务类别不匹配')

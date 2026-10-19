@@ -36,8 +36,23 @@ def requested_format(text):
     return max(matches)[1] if matches else None
 
 
-def preference_prompt(contact):
-    mode=contact.get('reply_format','text') if contact else 'text'
+def preferences(store, contact):
+    """Resolve a contact override or the currently bound Agent's voice defaults."""
+    value={'reply_format':contact.get('reply_format','text'),
+           'voice_preset':contact.get('voice_preset','windows-huihui'),
+           'voice_model':contact.get('voice_model','speech-2.8-turbo')}
+    if value['reply_format']!='agent':return value
+    from .ai_store import AIStore
+    from .companion_models import ReplyVoiceOptions
+    try:
+        agent=AIStore(store).get('agents',contact.get('ai_agent_id',''))
+        voice=ReplyVoiceOptions.model_validate(agent.get('companion',{}).get('voice',{}))
+    except (KeyError, ValueError):voice=ReplyVoiceOptions()
+    return {'reply_format':voice.reply_format,'voice_preset':voice.preset,'voice_model':voice.model}
+
+
+def preference_prompt(contact,store=None):
+    mode=(preferences(store,contact)['reply_format'] if store else contact.get('reply_format','text')) if contact else 'text'
     if mode=='voice':
         return ('\n本会话已启用真实微信原生语音回复，系统会把你的正文转成语音并发送。'
                 '无需调用 speak 工具、无需说明技术流程，不要声称无法发送语音。日常聊天适合直接听：'
@@ -71,28 +86,25 @@ def speech_text(text):
 def deliver(bridge,store,message,contact,*,demo=False):
     """Send once; only synthesis failure before recording may fall back to text."""
     current=store.contact(contact['id'])
-    voice_id=current.get('voice_preset','windows-huihui')
-    voice_model=current.get('voice_model','speech-2.8-turbo')
+    selected=preferences(store,current)
+    voice_id=selected['voice_preset']
+    voice_model=selected['voice_model']
     minimax=voice_id.startswith('minimax:')
     if minimax:
         from .minimax_voice import MiniMaxVoice
         voice_revision=MiniMaxVoice(store).config()['revision']
     use_voice=(message.get('origin')=='ai' and message['kind'] in ('text','voice')
-               and current.get('reply_format')=='voice')
-    if use_voice and message.get('ai_run_id'):
-        from .ai_store import AIStore
-        # Shared task results keep the same text/image presentation for all
-        # recipients, rather than performing per-contact voice generation.
-        if AIStore(store).run(message['ai_run_id'])['state'].get('agent_schedule'):use_voice=False
+               and selected['reply_format']=='voice')
     text=speech_text(message['text']) if use_voice else None
     fallback='内容较长或包含链接、列表，保留完整文字' if use_voice and not text else ''
     def ensure_current():
         if not store.ai_send_valid(message):raise ReplySuperseded('收到新消息或会话设置变化，旧回复已取消')
-        if text and store.contact(contact['id']).get('reply_format')!='voice':
+        latest=preferences(store,store.contact(contact['id']))
+        if text and latest['reply_format']!='voice':
             raise ReplySuperseded('已切换为文字回复，未发送旧语音')
-        if text and store.contact(contact['id']).get('voice_preset','windows-huihui')!=voice_id:
+        if text and latest['voice_preset']!=voice_id:
             raise ReplySuperseded('音色已变化，未发送旧音色语音')
-        if text and minimax and (store.contact(contact['id']).get('voice_model','speech-2.8-turbo')!=voice_model
+        if text and minimax and (latest['voice_model']!=voice_model
                 or MiniMaxVoice(store).config()['revision']!=voice_revision):
             raise ReplySuperseded('语音模型或 Key 已变化，未发送旧语音')
     def mark(kind):

@@ -173,7 +173,7 @@ test('MCP：待配置预设、发现工具、导入及编辑权限',async({page,
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   try{
     await page.goto('/');await page.getByRole('button',{name:'AI 中心',exact:true}).click();
-    await page.getByRole('tab',{name:'扩展中心',exact:true}).click();await page.getByRole('tab',{name:'连接器',exact:true}).click();
+    await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'MCP',exact:true}).click();
     const amap=page.locator('.ai-resource-card').filter({has:page.getByRole('heading',{name:'高德地图 MCP',exact:true})});
     await expect(amap).toContainText('待填写 Key');
     await amap.getByRole('button',{name:'发现工具'}).click();
@@ -184,7 +184,7 @@ test('MCP：待配置预设、发现工具、导入及编辑权限',async({page,
     await tree.getByRole('button',{name:'配置',exact:true}).click();
     await expect(page.locator('#mcp-profile-hint')).toContainText('尚未核实公开 MCP 地址');
     await page.getByRole('button',{name:'取消',exact:true}).click();
-    await page.getByRole('button',{name:'添加连接器',exact:true}).click();await page.locator('[data-connector-type="mcp"]').click();
+    await page.getByRole('button',{name:'添加 MCP',exact:true}).click();
     const form=page.locator('#ai-editor-form');
     await form.getByLabel('名称',{exact:true}).fill('UI 本地 MCP');
     await form.getByLabel('MCP 接入地址',{exact:true}).fill(`http://127.0.0.1:${server.address().port}/mcp`);
@@ -199,6 +199,7 @@ test('MCP：待配置预设、发现工具、导入及编辑权限',async({page,
     const connection=data.mcp.find(c=>c.name==='UI 本地 MCP'),tool=data.tools.find(t=>t.connection_id===connection.id);
     expect(tool.kind).toBe('mcp');expect(tool.approval).toBe('confirm');
     await page.screenshot({path:'test-results/mcp-connections.png',fullPage:true});
+    await page.getByRole('button',{name:'AI 中心',exact:true}).click();await page.getByRole('tab',{name:'扩展中心',exact:true}).click();
     await page.getByRole('tab',{name:'工具与权限',exact:true}).click();
     const imported=page.locator('.ai-resource-card').filter({has:page.getByRole('heading',{name:tool.name,exact:true})});
     await imported.getByRole('button',{name:'编辑',exact:true}).click();
@@ -332,7 +333,8 @@ test('AI 中心：模型、知识、流程、辅助回复、外部 Agent 与独�
     await expect(page.locator('#ai-library')).toContainText('密钥已加密保存');
     await page.locator('.ai-resource-card').filter({has:page.getByRole('heading',{name:'测试模型连接',exact:true})}).getByRole('button',{name:'测试连接',exact:true}).click();
     await expect(page.locator('#toast')).toContainText('电商 Agent');
-    await page.getByRole('tab',{name:'资料与记忆',exact:true}).click();await page.getByRole('tab',{name:'知识库',exact:true}).click();await page.locator('#ai-create').click();
+    await page.getByRole('button',{name:'AI 中心',exact:true}).click();
+    await page.getByRole('tab',{name:'知识库',exact:true}).click();await page.locator('#ai-create').click();
     await form.getByLabel('名称',{exact:true}).fill('商品与售后');
     await page.locator('#ai-import-files').setInputFiles({name:'售后.md',mimeType:'text/markdown',buffer:Buffer.from('保温杯支持七天退货，运费规则以订单为准。')});
     await expect(page.locator('#ai-documents')).toContainText('资料正文');
@@ -343,13 +345,14 @@ test('AI 中心：模型、知识、流程、辅助回复、外部 Agent 与独�
     await expect(page.getByRole('tab',{name:'回复风格',exact:true})).toHaveCount(0);
     await expect(form.getByLabel('回复风格',{exact:true})).toHaveCount(0);
     await form.getByLabel('此 Agent 的职责与规则').fill('负责商品与售后咨询。');
-    await page.locator('#agent-tab-abilities').click();await form.locator('summary').filter({hasText:'参考资料'}).click();await page.locator('#agent-rights > summary').click();
-    await form.getByLabel('商品与售后',{exact:true}).check();await form.getByLabel('计算器',{exact:true}).check();
+    await page.locator('#agent-tab-memory').click();await form.locator('summary').filter({hasText:'参考资料'}).click();
+    await form.getByLabel('商品与售后',{exact:true}).check();
     await form.getByLabel('知识检索方式').selectOption('always');
+    await page.locator('#agent-tab-abilities').click();await page.getByLabel('查找工具或技能',{exact:true}).fill('计算器');await form.getByLabel('计算器',{exact:true}).check();
     await page.locator('#agent-tab-advanced').click();
     await page.getByRole('button',{name:'添加步骤',exact:true}).click();
     await page.getByLabel('步骤 3 类型').selectOption('tool');
-    await form.getByLabel('执行工具（需在能力与技能中授权）').selectOption({label:'calculate'});
+    await form.getByLabel('执行工具（需在工具与技能中授权）').selectOption({label:'calculate'});
     await form.getByLabel('工具参数 JSON',{exact:true}).fill('{"expression":"6*7"}');
     await page.getByRole('button',{name:'上移步骤 3',exact:true}).click();
     await expect(page.getByLabel('步骤 2 类型')).toHaveValue('tool');
@@ -357,7 +360,7 @@ test('AI 中心：模型、知识、流程、辅助回复、外部 Agent 与独�
     await form.getByRole('button',{name:'保存配置'}).click();await expect(page.locator('#ai-editor')).not.toBeVisible();
     await page.locator('.ai-resource-card').filter({has:page.getByRole('heading',{name:'电商 Agent',exact:true})}).getByRole('button',{name:'测试 Agent',exact:true}).click();
     await page.getByLabel('测试消息',{exact:true}).fill('保温杯可以退货吗？');await page.getByRole('button',{name:'开始测试',exact:true}).click();
-    await expect(page.locator('#ai-test-result')).toContainText('测试完成',{timeout:20000});
+    await expect(page.locator('#ai-test-result .ai-run-heading .pill')).toHaveText('已完成',{timeout:20000});
     await expect(page.locator('#ai-test-result')).toContainText('知识检索');
     await expect(page.locator('#ai-test-result')).toContainText('工具结果');
     expect(modelRequests.at(-1).messages.some(m=>m.content.includes('七天退货'))).toBe(true);
@@ -422,24 +425,24 @@ test('标准 Skill：导入、绑定、加载并调用已授权工具',async({pa
   try{
     const p=await (await request.post('/api/ai/config/providers',{headers,data:{name:'Skill 测试模型',base_url:`http://127.0.0.1:${server.address().port}`,model:'skill-test'}})).json();
     await page.goto('/');await page.getByRole('button',{name:'AI 中心',exact:true}).click();
-    await page.getByRole('tab',{name:'扩展中心',exact:true}).click();await page.getByRole('tab',{name:'技能',exact:true}).click();await page.locator('#ai-create').click();
+    await page.getByRole('tab',{name:'扩展中心',exact:true}).click();await page.getByRole('tab',{name:'Skills',exact:true}).click();await page.locator('#ai-create').click();
     await page.locator('#skill-import-file').setInputFiles({name:'SKILL.md',mimeType:'text/markdown',buffer:Buffer.from('---\nname: ui-calculate-skill\ndescription: 使用工具完成乘法\n---\n请调用 calculate 计算 7*8，然后回复结果。')});
     const form=page.locator('#ai-editor-form');await expect(form.getByLabel('名称',{exact:true})).toHaveValue('ui-calculate-skill');
     await form.getByRole('button',{name:'保存配置'}).click();await expect(page.locator('#ai-editor')).not.toBeVisible();
     await page.getByRole('tab',{name:'我的 Agent',exact:true}).click();await page.locator('#ai-create').click();
     await form.getByLabel('名称',{exact:true}).fill('Skill 执行测试');await form.getByLabel('模型连接',{exact:true}).selectOption(p.id);
-    await page.locator('#agent-tab-abilities').click();await page.locator('#agent-rights > summary').click();
-    await form.getByLabel('ui-calculate-skill',{exact:true}).check();await form.getByLabel('计算器',{exact:true}).check();
+    await page.locator('#agent-tab-abilities').click();await page.getByLabel('查找工具或技能',{exact:true}).fill('ui-calculate-skill');
+    await form.getByLabel('ui-calculate-skill',{exact:true}).check();await page.getByLabel('查找工具或技能',{exact:true}).fill('计算器');await form.getByLabel('计算器',{exact:true}).check();
     await expect(form.getByLabel('知识检索方式')).toHaveValue('on_demand');
     await expect(form.getByLabel('联网检索策略')).toHaveValue('auto');
-    await form.locator('summary').filter({hasText:'联网与生活'}).click();
+    await page.locator('#agent-tab-advanced').click();await page.locator('#agent-network-policy > summary').click();
     await form.getByLabel('联网检索策略').selectOption('model');
     await form.getByRole('button',{name:'保存配置'}).click();await expect(page.locator('#ai-editor')).not.toBeVisible();
     const savedAgents=(await (await request.get('/api/ai/bootstrap')).json()).agents;
     expect(savedAgents.find(a=>a.name==='Skill 执行测试').web_policy).toBe('model');
     const card=page.locator('.ai-resource-card').filter({has:page.getByRole('heading',{name:'Skill 执行测试',exact:true})});
     await card.getByRole('button',{name:'测试 Agent'}).click();await page.getByLabel('测试消息',{exact:true}).fill('使用乘法技能');await page.getByRole('button',{name:'开始测试',exact:true}).click();
-    await expect(page.locator('#ai-test-result')).toContainText('测试完成',{timeout:15000});
+    await expect(page.locator('#ai-test-result .ai-run-heading .pill')).toHaveText('已完成',{timeout:15000});
     await expect(page.locator('#ai-test-result')).toContainText('加载技能');
     await expect(page.locator('#ai-test-result')).not.toContainText('知识检索');
     await expect(page.locator('#ai-test-reply')).toHaveValue('按照技能计算，结果是 56。');
@@ -468,7 +471,7 @@ test('陪伴 Agent：角色配置、连续记忆、遗忘和关怀日程',async(
     await page.locator('#agent-tab-memory').click();
     await form.locator('summary').filter({hasText:'三层长期记忆'}).click();
     await form.getByLabel('启用长期记忆',{exact:true}).check();
-    await page.locator('#agent-tab-abilities').click();await form.locator('summary').filter({hasText:'联网与生活'}).click();
+    await page.locator('#agent-tab-advanced').click();await page.locator('#agent-network-policy > summary').click();
     await form.getByLabel('参考链接展示',{exact:true}).selectOption('requested');
     await form.getByRole('button',{name:'保存配置',exact:true}).click();
     await expect(page.locator('#ai-editor')).not.toBeVisible();
@@ -480,9 +483,9 @@ test('陪伴 Agent：角色配置、连续记忆、遗忘和关怀日程',async(
     await page.getByLabel('测试用户已自我声明成年').check();
     await page.getByLabel('测试消息',{exact:true}).fill('我家猫叫芝麻');
     await page.getByRole('button',{name:'开始测试',exact:true}).click();
-    await expect(page.locator('#ai-test-result')).toContainText('测试完成',{timeout:15000});
+    await expect(page.locator('#ai-test-result .ai-run-heading .pill')).toHaveText('已完成',{timeout:15000});
     await page.getByRole('button',{name:'关闭 Agent 测试'}).click();
-    await page.getByRole('tab',{name:'资料与记忆',exact:true}).click();await page.getByRole('tab',{name:'记忆与档案'}).click();
+    await card.getByRole('button',{name:'记忆与档案',exact:true}).click();
     const agents=(await (await request.get('/api/ai/bootstrap')).json()).agents;
     await page.getByLabel('记忆所属 Agent').selectOption(agents.find(a=>a.name==='阿慧 · 甜心陪伴').id);
     await page.getByRole('button',{name:'读取记忆与档案'}).click();
@@ -494,11 +497,12 @@ test('陪伴 Agent：角色配置、连续记忆、遗忘和关怀日程',async(
     page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'遗忘此用户全部记忆'}).click();
     await expect(page.locator('.memory-card')).toHaveCount(0);
     await page.getByRole('tab',{name:'自动任务'}).click();
+    await page.getByRole('tab',{name:'联系人关怀',exact:true}).click();
     await page.getByRole('button',{name:'添加关怀日程'}).click();
     await expect(page.getByLabel('Cron 表达式（重复）')).toHaveValue('0 9 * * *');
     await page.locator('#companion-modal').getByRole('button',{name:'关闭',exact:true}).click();
-    await page.getByRole('tab',{name:'扩展中心',exact:true}).click();await page.getByRole('tab',{name:'连接器',exact:true}).click();
-    await page.getByRole('button',{name:'添加连接器',exact:true}).click();await page.locator('[data-connector-type="tts"]').click();
+    await page.getByRole('button',{name:'设置',exact:true}).click();await page.getByRole('tab',{name:'MCP',exact:true}).click();
+    await page.getByRole('tab',{name:'服务配置',exact:true}).click();await page.getByRole('button',{name:'添加服务',exact:true}).click();
     await page.getByLabel('能力类别',{exact:true}).selectOption('tts');
     await page.getByLabel('接入协议',{exact:true}).selectOption('minimax');
     await page.getByLabel('名称',{exact:true}).fill('MiniMax 待配置');

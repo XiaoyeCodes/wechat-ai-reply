@@ -5,10 +5,10 @@ async function create(request,kind,data){
  const response=await request.post('/api/ai/config/'+kind,{headers,data});
  expect(response.ok(),await response.text()).toBeTruthy();return response.json();
 }
-async function openSchedules(page){
+async function openSchedules(page,agent){
  await page.goto('/');
  await page.getByRole('button',{name:'AI 中心',exact:true}).click();
- await page.locator('[data-ai-section="schedules"]').click();
+ await page.locator(`[data-agent-schedules="${agent.id}"]`).click();
  await expect(page.getByRole('tab',{name:'Agent 定时任务',exact:true})).toBeVisible();
 }
 
@@ -19,7 +19,7 @@ test('Agent 定时任务：创建每日任务、编辑每周规则、启停、�
  const agent=await create(request,'agents',{name:'定时界面 Agent',provider_id:provider.id,skill_ids:[skill.id]});
  let sid;
  try{
-  await openSchedules(page);
+  await openSchedules(page,agent);
   await page.getByRole('button',{name:'新建定时任务',exact:true}).click();
   const dialog=page.locator('#agent-schedule-editor');
   await dialog.locator('[name="agent_id"]').selectOption(agent.id);
@@ -91,7 +91,7 @@ test('Agent 定时任务：本地假模型执行一次，向两位演示联系�
   const enabled=await request.put('/api/ai/settings',{headers,data:{enabled:true}});expect(enabled.ok()).toBeTruthy();
   const response=await request.post('/api/ai/agent-schedules',{headers,data:{agent_id:agent.id,title:'共同结果推送',instruction:'返回一份简短公共结果。',kind:'cron',cron:'0 9 * * *',timezone:'Asia/Shanghai',enabled:true}});
   expect(response.ok(),await response.text()).toBeTruthy();sid=(await response.json()).id;
-  await openSchedules(page);
+  await openSchedules(page,agent);
   const card=page.locator('.agent-schedule-card').filter({hasText:'共同结果推送'});
   await expect(card).toContainText('2 位符合条件的联系人');
   await expect(card.getByRole('button',{name:'立即运行',exact:true})).toBeEnabled();
