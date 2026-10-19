@@ -9,12 +9,15 @@ IMAGE_WAIT_SECONDS = 20
 READ_ONLY = ONLINE | {'clock','calculator','knowledge_search','memory_search','use_skill','read_skill_file'}
 
 
-def latest_id(db,cid,agent,ready_only=False):
+def latest_id(db,cid,agent,ready_only=False,group_sender=None):
     media=agent.get('companion',{}).get('media',{})
     pending=bool((media.get('understand_images') and media.get('vision_provider_id')) or media.get('image_service_id'))
+    from .group_chats import eligible_sql
+    contact=db.execute('SELECT * FROM contacts WHERE id=?',(cid,)).fetchone()
+    clause,args=eligible_sql(dict(contact),group_sender) if contact else ('',[])
     return db.execute("SELECT MAX(id) FROM messages WHERE contact_id=? AND historical=0 AND direction='incoming' "
         +("AND text_pending=0 " if ready_only else '')+
-        "AND (kind='text' OR (kind='image' AND (media_id!='' OR ?)))",(cid,pending)).fetchone()[0]
+        "AND (kind='text' OR (kind='image' AND (media_id!='' OR ?)))"+clause,(cid,pending,*args)).fetchone()[0]
 
 
 def stamp(value):
@@ -22,6 +25,8 @@ def stamp(value):
 
 
 def unanswered(ai,contact,trigger,forget_before=0):
+    from .group_chats import is_group
+    if is_group(contact):return [trigger]
     boundary=max(contact.get('ai_start_message',0),contact.get('ai_context_start_message',0),forget_before)
     with ai.store.connect() as db:
         # A manual answer or attempted AI delivery closes the preceding turn.
@@ -57,6 +62,8 @@ def prepare(ai,contact,trigger,state,forget_before=0):
         recent=[m for m in ai.store.messages(contact['id'],before=trigger['id']+1,limit=40)
                 if m['id']>boundary and m['kind']=='image' and m['direction']=='incoming'
                 and m['id'] not in state['turn_message_ids']][-4:]
+        from .group_chats import is_group, qualifies
+        if is_group(contact):recent=[m for m in recent if qualifies(contact,m) and m['sender']==trigger['sender']]
     chosen=(current+recent)[:8]
     state['input_images']=[{'message_id':m['id'],'media_id':m.get('media_id',''),
                             'media_scope':'wechat:'+contact['id'],'current':m in current} for m in chosen]

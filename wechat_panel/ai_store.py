@@ -270,9 +270,11 @@ class AIStore:
             if discard_unseen:
                 db.execute('UPDATE contacts SET ai_start_message=COALESCE((SELECT MAX(id) FROM messages WHERE contact_id=?),0) WHERE id=?',(cid,cid))
             db.execute("DELETE FROM ai_inbox WHERE contact_id=?",(cid,))
-            db.execute("UPDATE ai_runs SET status='cancelled',error=?,updated_at=? WHERE contact_id=? AND status IN ('pending','running','waiting_approval','draft','queued')",(reason,now(),cid))
+            db.execute("UPDATE ai_runs SET status='cancelled',error=?,updated_at=? WHERE contact_id=? AND status IN ('pending','running','waiting_approval','draft','queued')"+
+                       (" AND mode!='agent_delivery'" if not discard_unseen else ''),(reason,now(),cid))
             db.execute("UPDATE ai_approvals SET status='cancelled' WHERE run_id IN (SELECT id FROM ai_runs WHERE contact_id=? AND status='cancelled')",(cid,))
-            db.execute("UPDATE messages SET status='cancelled',error=? WHERE contact_id=? AND origin IN ('ai','approval','ai_progress') AND status='queued'",(reason,cid))
+            db.execute("UPDATE messages SET status='cancelled',error=? WHERE contact_id=? AND origin IN ('ai','approval','ai_progress') AND status='queued'"+
+                       (" AND (ai_run_id IS NULL OR ai_run_id NOT IN (SELECT id FROM ai_runs WHERE mode='agent_delivery'))" if not discard_unseen else ''),(reason,cid))
             db.execute("UPDATE hermes_confirmations SET status='cancelled' WHERE contact_id=? AND status='pending'",(cid,))
             self.store.event(db,'ai.run',cid,detail=reason)
 
@@ -280,10 +282,14 @@ class AIStore:
         for contact in self.store.contacts():self.cancel_contact(contact['id'],reason)
         with self.store.connect() as db:
             db.execute("UPDATE ai_runs SET status='cancelled',error=?,updated_at=? WHERE dry_run=1 AND status IN ('pending','running','waiting_approval','draft')",(reason,now()))
+            db.execute("UPDATE ai_runs SET status='cancelled',error=?,updated_at=? WHERE mode='agent_task' AND status IN ('pending','running','waiting_approval','draft')",(reason,now()))
             db.execute("UPDATE ai_approvals SET status='cancelled' WHERE status='pending' AND run_id IN (SELECT id FROM ai_runs WHERE status='cancelled')")
 
     def valid(self,run):
         if run['status'] in ('cancelled','failed'):return False
+        if run.get('state',{}).get('agent_schedule'):
+            from .agent_schedules import task_valid
+            return task_valid(self.store,run)
         if run['dry_run']:return run['status'] not in ('cancelled','failed')
         if run.get('schedule_id'):
             from .companion_scheduler import schedule_valid
@@ -293,7 +299,7 @@ class AIStore:
         settings=self.settings()
         with self.store.connect() as db:
             from .conversation_turn import latest_id
-            latest=latest_id(db,contact['id'],run['state']['snapshot']['agent'])
+            latest=latest_id(db,contact['id'],run['state']['snapshot']['agent'],group_sender=run['state'].get('group_sender'))
             from .hermes_confirmations import pending_reply
             current=(latest==(run.get('resume_message_id') or run['trigger_id']) or pending_reply(db,run,latest))
         return (not self.store.paused() and settings['enabled'] and contact['listening']

@@ -9,8 +9,10 @@
   <link rel="stylesheet" href="/assets/app.css">
   <link rel="stylesheet" href="/assets/voice-settings.css?v=1">
   <link rel="stylesheet" href="/assets/ai.css?v=workspace-1">
-  <script src="/assets/app.js?v=voice-settings-3" type="module"></script>
+  <script src="/assets/app.js?v=groups-1" type="module"></script>
 <link rel="stylesheet" href="/assets/companion.css">
+  <link rel="stylesheet" href="/assets/agent-schedules.css?v=1">
+  <link rel="stylesheet" href="/assets/groups.css?v=1">
   <link rel="stylesheet" href="/assets/selects.css?v=1">
 </head>
 <body>
@@ -49,7 +51,7 @@
           <label class="search-field"><span data-icon="search"></span><input id="conversation-search" type="search" placeholder="搜索联系人或微信号" aria-label="搜索会话"></label>
           <div class="filters" id="conversation-filters"><button class="active" data-filter="all">全部</button><button data-filter="unread">未处理<span id="unread-count"></span></button><button data-filter="listening">监听中</button></div>
           <div id="conversation-list" class="conversation-list"></div>
-          <div class="list-footnote"><span data-icon="shield"></span>仅同步你添加的联系人</div>
+          <div class="list-footnote"><span data-icon="shield"></span>仅同步你添加的私聊与群聊</div>
         </section>
 
         <section class="chat-room" aria-label="聊天区域">
@@ -107,7 +109,7 @@
         </aside>
       </main>
 
-      <main id="view-contacts" class="page-view" hidden><div class="page-intro"><div><span class="eyebrow">CONTACTS</span><h2>只连接需要的对话</h2><p>通过微信号核验身份，按联系人管理消息监听。</p></div><button id="sync-avatars" class="button secondary avatar-sync"><span data-icon="refresh"></span>同步头像</button></div><label class="search-field table-search"><span data-icon="search"></span><input type="search" id="contact-search" placeholder="搜索备注、昵称或微信号" aria-label="搜索联系人"></label><div class="table-wrap"><table><thead><tr><th>联系人</th><th>微信号</th><th>消息监听</th><th>会话模式</th><th>操作</th></tr></thead><tbody id="contacts-table"></tbody></table><div id="contacts-empty" class="table-empty" hidden>还没有添加联系人。点击右上角“添加联系人”开始。</div></div></main>
+      <main id="view-contacts" class="page-view" hidden><div class="page-intro"><div><span class="eyebrow">CONTACTS</span><h2>只连接需要的对话</h2><p>按微信号核验私聊身份，按完整群名连接群聊；分别配置消息监听规则。</p></div><button id="sync-avatars" class="button secondary avatar-sync"><span data-icon="refresh"></span>同步头像</button></div><label class="search-field table-search"><span data-icon="search"></span><input type="search" id="contact-search" placeholder="搜索备注、昵称、群名或微信号" aria-label="搜索联系人"></label><div class="table-wrap"><table><thead><tr><th>联系人</th><th>微信号 / 会话类型</th><th>消息监听</th><th>会话模式</th><th>操作</th></tr></thead><tbody id="contacts-table"></tbody></table><div id="contacts-empty" class="table-empty" hidden>还没有添加联系人。点击右上角“添加联系人”开始。</div></div></main>
 
       <main id="view-status" class="page-view" hidden><div class="page-intro"><div><span class="eyebrow">SYSTEM STATUS</span><h2>每一段连接，都有迹可循</h2><p>查看微信连接和消息同步状态。</p></div><button class="button secondary" id="reconnect"><span data-icon="refresh"></span>重启微信连接</button></div><div id="status-cards" class="status-cards"></div><div class="activity-section"><h3>最近的操作</h3><div id="activity-list"></div></div></main>
 

@@ -38,7 +38,9 @@ def prompt(state):
 
 def execute(ai,run,state):
     agent=state['snapshot']['agent']
-    if agent['kind']!='workflow' or run.get('schedule_id'):return False
+    if agent['kind']!='workflow' or run.get('schedule_id') or state.get('agent_schedule') or state.get('group_sender'):return False
+    from .skills import explicitly_requested
+    if explicitly_requested(state,run['input']):return False
     # Keep explicitly authored fixed tool workflows intact.
     if any(step['type']=='tool' for step in agent['steps']):return False
     mode=requested(run['input'])

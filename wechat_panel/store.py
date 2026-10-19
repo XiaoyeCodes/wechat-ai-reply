@@ -72,10 +72,19 @@ class Store:
             ''')
             for table, fields in {
                 'contacts':{'ai_agent_id':"TEXT NOT NULL DEFAULT ''",'ai_revision':'INTEGER NOT NULL DEFAULT 0','ai_start_message':'INTEGER NOT NULL DEFAULT 0',
+                            'chat_type':"TEXT NOT NULL DEFAULT 'direct'",'group_members':"TEXT NOT NULL DEFAULT '[]'",
+                            'group_mention_only':'INTEGER NOT NULL DEFAULT 1','group_self_name':"TEXT NOT NULL DEFAULT ''",
+                            'group_identity_verified':'INTEGER NOT NULL DEFAULT 0','group_members_verified':'INTEGER NOT NULL DEFAULT 0',
+                            'group_self_name_verified':'INTEGER NOT NULL DEFAULT 0',
+                            'group_self_name_source':"TEXT NOT NULL DEFAULT ''",
+                            'ai_delivery_revision':'INTEGER NOT NULL DEFAULT 0',
                             'ai_context_start_message':'INTEGER NOT NULL DEFAULT 0','reply_format':"TEXT NOT NULL DEFAULT 'text'",
                             'voice_preset':"TEXT NOT NULL DEFAULT 'windows-huihui'",
                             'voice_model':"TEXT NOT NULL DEFAULT 'speech-2.8-turbo'"},
                 'messages':{'origin':"TEXT NOT NULL DEFAULT 'manual'",'ai_run_id':'TEXT',
+                            'sender':"TEXT NOT NULL DEFAULT ''",'sender_verified':'INTEGER NOT NULL DEFAULT 0',
+                            'mention_me':'INTEGER NOT NULL DEFAULT 0','mention_verified':'INTEGER NOT NULL DEFAULT 0',
+                            'mention_source':"TEXT NOT NULL DEFAULT ''",
                             'direction_verified':'INTEGER NOT NULL DEFAULT 0','media_id':"TEXT NOT NULL DEFAULT ''",'text_pending':'INTEGER NOT NULL DEFAULT 0'}
             }.items():
                 columns={r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
@@ -116,6 +125,10 @@ class Store:
 
     @staticmethod
     def _contact_image_urls(contact):
+        from .group_chats import members
+        if 'group_members' in contact:contact['group_members'] = members(contact['group_members'])
+        for field in ('group_mention_only','group_identity_verified','group_members_verified','group_self_name_verified'):
+            if field in contact:contact[field]=bool(contact[field])
         base = f"/api/contacts/{contact['id']}/avatar"
         contact['avatar_url'] = f"{base}?v={contact['avatar_version']}" if contact.get('avatar_version') else None
         contact['self_avatar_url'] = f"{base}?own=true&v={contact['self_avatar_version']}" if contact.get('self_avatar_version') else None
@@ -163,22 +176,35 @@ class Store:
             return row['data']
 
     def add_contact(self, profile):
+        from .group_chats import is_group, members, VERIFICATION_FIELDS
         contact_id = str(uuid.uuid4())
         with self.connect() as db:
             db.execute('''INSERT INTO contacts
                 (id,lookup,wechat_id,nickname,account_id,created_at,verified_at)
                 VALUES(?,?,?,?,?,?,?)''', (contact_id, profile['lookup'], profile['wechat_id'],
                 profile['nickname'], profile['account_id'], now(), now()))
+            if is_group(profile):
+                db.execute('''UPDATE contacts SET chat_type='group',group_members=?,group_mention_only=?,group_self_name=?,
+                    group_identity_verified=?,group_members_verified=?,group_self_name_verified=? WHERE id=?''',
+                    (json.dumps(members(profile.get('group_members', [])), ensure_ascii=False),bool(profile.get('group_mention_only', True)),
+                     profile.get('group_self_name', ''),*(bool(profile.get(k)) for k in VERIFICATION_FIELDS),contact_id))
+                db.execute('UPDATE contacts SET group_self_name_source=? WHERE id=?',(profile.get('group_self_name_source',''),contact_id))
             self.event(db, 'contact.added', contact_id)
         if profile.get('avatar_data'):
             self.set_avatar(profile['account_id'], profile['wechat_id'], profile['avatar_data'])
         return self.contact(contact_id)
 
     def update_contact(self, contact_id, **values):
-        self.contact(contact_id)
+        current = self.contact(contact_id)
         allowed = {'listening', 'mode', 'listener_state', 'error', 'unread', 'verified_at','ai_agent_id','reply_format','voice_preset','voice_model'}
+        from .group_chats import is_group, members, RULE_FIELDS, VERIFICATION_FIELDS
+        allowed |= RULE_FIELDS | set(VERIFICATION_FIELDS) | {'group_self_name_source'}
         if not values or not set(values) <= allowed:
             raise ValueError('无效的联系人字段')
+        if set(values) & (RULE_FIELDS | set(VERIFICATION_FIELDS)) and not is_group(current):
+            raise ValueError('群监听规则仅适用于群聊')
+        if 'group_members' in values:values['group_members'] = json.dumps(members(values['group_members']),ensure_ascii=False)
+        if is_group(current) and values.get('reply_format') == 'voice':raise ValueError('群聊当前支持文字和图片回复')
         if 'reply_format' in values and values['reply_format'] not in ('text','voice'):
             raise ValueError('回复形式只支持文字或语音')
         if 'voice_preset' in values:
@@ -194,9 +220,11 @@ class Store:
                            (contact_id,contact_id))
             db.execute('UPDATE contacts SET ' + ','.join(f'{x}=?' for x in values) + ' WHERE id=?',
                        (*values.values(), contact_id))
-            if set(values)&{'listening','mode','ai_agent_id'}:
-                db.execute('''UPDATE contacts SET ai_revision=ai_revision+1,ai_start_message=
+            if set(values)&({'listening','mode','ai_agent_id'} | RULE_FIELDS):
+                db.execute('''UPDATE contacts SET ai_revision=ai_revision+1,ai_delivery_revision=ai_delivery_revision+1,ai_start_message=
                     COALESCE((SELECT MAX(id) FROM messages WHERE contact_id=?),0) WHERE id=?''',(contact_id,contact_id))
+                if set(values)&RULE_FIELDS:
+                    db.execute('UPDATE contacts SET ai_context_start_message=ai_start_message WHERE id=?',(contact_id,))
             self.event(db, 'contact.updated', contact_id)
         return self.contact(contact_id)
 
@@ -224,12 +252,18 @@ class Store:
         with self.connect() as db:
             rows = db.execute('''SELECT * FROM messages WHERE contact_id=? AND id<?
                 ORDER BY id DESC LIMIT ?''', (contact_id, before or 2**63-1, limit)).fetchall()
-            return [dict(x) for x in reversed(rows)]
+            return [self._message_values(dict(x)) for x in reversed(rows)]
+
+    @staticmethod
+    def _message_values(message):
+        for field in ('sender_verified','mention_me','mention_verified'):
+            if field in message:message[field]=bool(message[field])
+        return message
 
     def message(self, message_id):
         with self.connect() as db:
             row = db.execute('SELECT * FROM messages WHERE id=?', (message_id,)).fetchone()
-            return dict(row) if row else None
+            return self._message_values(dict(row)) if row else None
 
     def enqueue(self, contact_id, text, client_key, origin='manual', ai_run_id=None, kind='text'):
         contact = self.contact(contact_id)
@@ -383,13 +417,18 @@ class Store:
             row=db.execute('''SELECT r.*,c.mode current_mode,c.ai_agent_id,c.ai_revision,c.listening FROM ai_runs r
                 JOIN contacts c ON c.id=r.contact_id WHERE r.id=?''',(message.get('ai_run_id'),)).fetchone()
             if not row:return False
+            from .ai_store import AIStore
+            state=AIStore.decode_state(row['state'])
+            if state.get('agent_schedule'):
+                from .agent_schedules import task_valid
+                return row['status']=='queued' and task_valid(self,dict(row)|{'state':state})
             if row['schedule_id']:
                 from .companion_scheduler import schedule_valid
                 return row['status']=='queued' and schedule_valid(self,dict(row))
             settings=json.loads(db.execute("SELECT value FROM settings WHERE key='ai_settings'").fetchone()[0])
             from .conversation_turn import latest_id
             from .ai_store import AIStore
-            latest=latest_id(db,row['contact_id'],AIStore.decode_state(row['state'])['snapshot']['agent'])
+            latest=latest_id(db,row['contact_id'],state['snapshot']['agent'],group_sender=state.get('group_sender'))
             paused=db.execute("SELECT value FROM settings WHERE key='paused'").fetchone()[0]=='true'
             return (not paused and settings['enabled'] and row['listening'] and row['status'] in (('running','queued') if progress else ('queued',))
                     and row['mode']==row['current_mode'] and row['agent_id']==row['ai_agent_id']
@@ -406,11 +445,26 @@ class Store:
         with self.connect() as db:
             return [dict(x) for x in db.execute("SELECT * FROM messages WHERE status='queued' ORDER BY id")]
 
+    def _agent_message(self,db,contact_id,message_id,text,account_id=None):
+        from .group_chats import qualifies
+        contact=db.execute('SELECT * FROM contacts WHERE id=?',(contact_id,)).fetchone()
+        message=db.execute('SELECT * FROM messages WHERE id=?',(message_id,)).fetchone()
+        if contact and message and qualifies(dict(contact),dict(message)):
+            self.event(db,'agent.message',contact_id,message_id=message_id,text=text,account_id=account_id)
+
     def ingest(self, contact_id, items):
         with self.connect() as db:
             if not db.execute('SELECT 1 FROM contacts WHERE id=?',(contact_id,)).fetchone():return
             prior=db.execute('SELECT data FROM snapshots WHERE contact_id=?',(contact_id,)).fetchone()
             previous=json.loads(prior[0]) if prior else None
+            items=[dict(item) for item in items]
+            for item in items:
+                if not item.get('sender_verified'):continue
+                collision=next((old for old in previous or [] if old['key']==item['key']
+                    and old.get('sender_verified') and old.get('sender')!=item.get('sender')),None)
+                if collision:
+                    item['raw_key']=item.get('raw_key',item['key'])
+                    item['key']+=':member:'+hashlib.sha256(item['sender'].encode()).hexdigest()[:16]
             items=align(previous,items)
             delta=compare(previous,items)
             if delta.gap:
@@ -440,16 +494,17 @@ class Store:
             # is the only snapshot writer.
             for item in delta.items:
                 cursor = db.execute('''INSERT OR IGNORE INTO messages
-                    (contact_id,direction,text,kind,status,created_at,source_key,historical,direction_verified,media_id,text_pending,error)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', (contact_id, item['direction'], item['text'],
-                    item.get('kind','text'), 'observed', now(), item['key'], delta.historical,bool(item.get('direction_verified')),media.get(item['key'],''),bool(item.get('text_pending')),item.get('text_error','')))
+                    (contact_id,direction,text,kind,status,created_at,source_key,historical,direction_verified,media_id,text_pending,error,
+                     sender,sender_verified,mention_me,mention_verified,mention_source)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (contact_id, item['direction'], item['text'],
+                    item.get('kind','text'), 'observed', now(), item['key'], delta.historical,bool(item.get('direction_verified')),media.get(item['key'],''),bool(item.get('text_pending')),item.get('text_error',''),
+                    item.get('sender',''),bool(item.get('sender_verified')),bool(item.get('mention_me')),bool(item.get('mention_verified')),item.get('mention_source','')))
                 if cursor.rowcount:
                     self.event(db, 'message.updated', contact_id, message_id=cursor.lastrowid)
                     if not delta.historical and item['direction'] == 'incoming':
                         db.execute('UPDATE contacts SET unread=unread+1 WHERE id=?', (contact_id,))
                         if (item.get('kind') == 'text' and not item.get('text_pending')) or (item.get('kind')=='image' and media.get(item['key'])):
-                            self.event(db, 'agent.message', contact_id, message_id=cursor.lastrowid,
-                                       text=item['text'], account_id=item.get('account_id'))
+                            self._agent_message(db,contact_id,cursor.lastrowid,item['text'],item.get('account_id'))
                         elif item.get('kind')=='image':
                             self.event(db,'agent.attachment',contact_id,message_id=cursor.lastrowid)
             # A new row can be clipped/undrawn on its first observation. Resolve
@@ -462,6 +517,17 @@ class Store:
                 row=db.execute('SELECT * FROM messages WHERE contact_id=? AND source_key=?',
                                (contact_id,item['key'])).fetchone()
                 if not row:continue
+                if item.get('sender_verified') and (not row['sender_verified'] or row['sender']==item.get('sender')):
+                    metadata=(item.get('sender',''),True,bool(item.get('mention_me')),bool(item.get('mention_verified')),item.get('mention_source',''))
+                    if metadata != tuple(row[k] for k in ('sender','sender_verified','mention_me','mention_verified','mention_source')):
+                        db.execute('''UPDATE messages SET sender=?,sender_verified=?,mention_me=?,mention_verified=?,mention_source=? WHERE id=?''',(*metadata,row['id']))
+                        self.event(db,'message.updated',contact_id,message_id=row['id'])
+                        enriched=dict(row)|dict(zip(('sender','sender_verified','mention_me','mention_verified','mention_source'),metadata))
+                        from .group_chats import qualifies
+                        contact=dict(db.execute('SELECT * FROM contacts WHERE id=?',(contact_id,)).fetchone())
+                        if (direction=='incoming' and not row['historical'] and qualifies(contact,enriched)
+                                and not db.execute("SELECT 1 FROM events WHERE type='agent.message' AND contact_id=? AND json_extract(payload,'$.message_id')=?",(contact_id,row['id'])).fetchone()):
+                            self._agent_message(db,contact_id,row['id'],item['text'],item.get('account_id'))
                 if not (row['origin']=='ai' and row['kind']=='voice') and 'text_pending' in item and (row['text']!=item['text'] or bool(row['text_pending'])!=bool(item['text_pending']) or row['error']!=item.get('text_error','')):
                     # Enrich the original UI row instead of inserting/replaying it.
                     db.execute('UPDATE messages SET text=?,text_pending=?,error=? WHERE id=?',
@@ -469,12 +535,12 @@ class Store:
                     self.event(db,'message.updated',contact_id,message_id=row['id'])
                     if (not item['text_pending'] and direction=='incoming' and not row['historical']
                             and not db.execute("SELECT 1 FROM events WHERE contact_id=? AND type='agent.message' AND json_extract(payload,'$.message_id')=?",(contact_id,row['id'])).fetchone()):
-                        self.event(db,'agent.message',contact_id,message_id=row['id'],text=item['text'],account_id=item.get('account_id'))
+                        self._agent_message(db,contact_id,row['id'],item['text'],item.get('account_id'))
                 if item['key'] in media and not row['media_id']:
                     db.execute("UPDATE messages SET media_id=?,error='' WHERE id=?",(media[item['key']],row['id']))
                     self.event(db,'message.updated',contact_id,message_id=row['id'])
                     if row['direction']=='incoming' and not row['historical']:
-                        self.event(db,'agent.message',contact_id,message_id=row['id'],text=row['text'],account_id=item.get('account_id'))
+                        self._agent_message(db,contact_id,row['id'],row['text'],item.get('account_id'))
                 if row['kind']=='image' and item.get('image_error') and not row['media_id']:
                     db.execute('UPDATE messages SET error=? WHERE id=?',(item['image_error'],row['id']))
                 verified=bool(item.get('direction_verified'))
@@ -487,7 +553,7 @@ class Store:
                             db.execute('UPDATE contacts SET unread=unread+1 WHERE id=?',(contact_id,))
                             if ((row['kind']=='text' and not item.get('text_pending',row['text_pending'])) or (row['kind']=='image' and (row['media_id'] or media.get(item['key'])))) and not db.execute("SELECT 1 FROM events WHERE contact_id=? AND type='agent.message' AND json_extract(payload,'$.message_id')=?",
                                                                    (contact_id,row['id'])).fetchone():
-                                self.event(db,'agent.message',contact_id,message_id=row['id'],text=item['text'],account_id=item.get('account_id'))
+                                self._agent_message(db,contact_id,row['id'],item['text'],item.get('account_id'))
                         elif row['direction']=='incoming':
                             db.execute('UPDATE contacts SET unread=MAX(0,unread-1) WHERE id=?',(contact_id,))
                 elif verified and not row['direction_verified'] and row['direction']==direction:

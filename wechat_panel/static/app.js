@@ -1,5 +1,6 @@
-import {initAI, refreshAI, scheduleAIRefresh, renderContactAI} from './ai.js?v=wechat-images-2';
+import {initAI, refreshAI, scheduleAIRefresh, renderContactAI} from './ai.js?v=groups-1';
 import {initVoice,renderVoice} from './voice.js?v=voice-settings-3';
+import {initGroups,isGroup,groupSummary,contactKindChanged,newContactBody,renderGroupDetails,groupMessageSender,demoIncomingBody} from './groups.js?v=1';
 
 const paths = {
   chat:'M4 4h16v12H10l-6 4V4Z M8 8h8 M8 12h5',
@@ -85,7 +86,7 @@ function renderHeader() {
   $('pause-button').querySelector('[data-icon]').innerHTML=icon(s.paused?'play':'pause');
   $('runtime-banner').hidden=ready;
   $('runtime-detail').textContent=s.paused?'监听与发送已暂停。已经开始的微信操作可能仍会完成。':s.detail||'正在建立本机连接…';
-  $('footer-state').textContent=!state.streamConnected?'同步连接正在建立…':`${s.state==='ready'&&!s.paused?state.contacts.filter(c=>c.listening&&['listening','background'].includes(c.listener_state)).length:0} 位联系人监听中 · ${s.queue_size||0} 条待发送`;
+  $('footer-state').textContent=!state.streamConnected?'同步连接正在建立…':`${s.state==='ready'&&!s.paused?state.contacts.filter(c=>c.listening&&['listening','background'].includes(c.listener_state)).length:0} 个会话监听中 · ${s.queue_size||0} 条待发送`;
   const input=$('message-input'), c=current();
   input.disabled=!c||s.paused||!['ready','starting','hidden'].includes(s.state)||c.mode==='listen_only';
   $('composer-notice').hidden=!input.disabled;
@@ -99,7 +100,7 @@ function renderConversations() {
   $('contact-count').textContent=state.contacts.length;
   const unread=state.contacts.reduce((n,c)=>n+c.unread,0);
   $('unread-count').textContent=unread?unread:'';
-  $('conversation-list').innerHTML=contacts.length?contacts.map(c=>`<button class="conversation-item ${c.id===state.selected?'selected':''}" data-contact="${escape(c.id)}" aria-label="打开 ${escape(c.lookup)} 的聊天">${avatar(c.lookup,c.avatar_url)}<div class="conversation-info"><div class="conversation-top"><span class="conversation-name">${escape(c.lookup)}</span><time class="conversation-time">${c.last_at?escape(dateText(c.last_at)):''}</time></div><div class="conversation-preview">${c.listening?`<i class="tiny-dot ${c.listener_state==='error'?'error':''}"></i>`:''}<p>${escape(c.last_message||listenerLabels[c.listener_state]||'尚无聊天记录')}</p>${c.unread?`<span class="unread-badge">${c.unread>99?'99+':c.unread}</span>`:''}</div></div></button>`).join(''):`<div class="list-empty">${state.contacts.length?'没有符合条件的会话':'尚未添加联系人<br>添加后即可开始聊天和监听'}</div>`;
+  $('conversation-list').innerHTML=contacts.length?contacts.map(c=>`<button class="conversation-item ${c.id===state.selected?'selected':''}" data-contact="${escape(c.id)}" aria-label="打开 ${escape(c.lookup)} 的聊天">${avatar(c.lookup,c.avatar_url)}<div class="conversation-info"><div class="conversation-top"><span class="conversation-name">${escape(c.lookup)}${isGroup(c)?'<span class="group-tag">群聊</span>':''}</span><time class="conversation-time">${c.last_at?escape(dateText(c.last_at)):''}</time></div><div class="conversation-preview">${c.listening?`<i class="tiny-dot ${c.listener_state==='error'?'error':''}"></i>`:''}<p>${escape(c.last_message||listenerLabels[c.listener_state]||'尚无聊天记录')}</p>${c.unread?`<span class="unread-badge">${c.unread>99?'99+':c.unread}</span>`:''}</div></div></button>`).join(''):`<div class="list-empty">${state.contacts.length?'没有符合条件的会话':'尚未添加联系人<br>添加后即可开始聊天和监听'}</div>`;
 }
 $('conversation-list').onclick=e=>{const button=e.target.closest('[data-contact]');if(button)selectContact(button.dataset.contact);};
 $('conversation-search').oninput=renderConversations;
@@ -145,10 +146,11 @@ function renderDetails() {
   $('retry-listener').hidden=c.listener_state!=='error';
   $('demo-controls').hidden=!state.status.demo;
   renderContactAI();
+  renderGroupDetails(c);
 }
 function renderMessages(force=false) {
   if(!current())return;
-  const fingerprint=JSON.stringify([current().avatar_url,current().self_avatar_url,state.messages.map(m=>[m.id,m.direction,m.kind,m.text,m.historical,m.status,m.error,m.origin,m.media_id])]);
+  const fingerprint=JSON.stringify([current().avatar_url,current().self_avatar_url,current().chat_type,state.messages.map(m=>[m.id,m.direction,m.kind,m.text,m.historical,m.status,m.error,m.origin,m.media_id,m.sender,m.sender_verified,m.mention_me,m.mention_verified])]);
   if(fingerprint===state.fingerprint&&!force)return;
   state.fingerprint=fingerprint;
   const box=$('messages'), nearBottom=box.scrollHeight-box.scrollTop-box.clientHeight<90, oldTop=box.scrollTop;
@@ -158,9 +160,10 @@ function renderMessages(force=false) {
     const divider=day!==date?`<div class="date-divider">${escape(day)}</div>`:'';date=day;
     if(m.direction==='system')return divider+`<div class="system-message">${escape(m.text)}</div>`;
     const outgoing=m.direction==='outgoing';
+    const sender=groupMessageSender(m,current());
     const labels=[dateText(m.created_at),m.origin==='ai'?'AI 回复':m.origin==='approval'?'操作确认':'',m.kind==='voice'?'语音消息':'',m.historical?'历史同步':'',m.direction==='unknown'?'方向待识别':'',messageLabels[m.status]||''].filter(Boolean);
     const body=m.kind==='image'&&m.media_id?`<a href="/api/ai/media/${encodeURIComponent(m.media_id)}" target="_blank" rel="noopener"><img class="message-photo" src="/api/ai/media/${encodeURIComponent(m.media_id)}" alt="收到的图片" loading="lazy"></a>`:escape(m.text);
-    return divider+`<div class="message-row ${escape(m.direction)}" data-message-id="${m.id}">${avatar(outgoing?'我':m.direction==='incoming'?current().lookup:'?',outgoing?current().self_avatar_url:m.direction==='incoming'?current().avatar_url:null)}<div class="message-column"><div class="message-bubble">${body}</div><div class="message-meta ${['uncertain','failed'].includes(m.status)?'error':''}">${labels.map(escape).join(' · ')}</div>${m.error?`<p class="message-error">${escape(m.error)}</p>`:''}</div></div>`;
+    return divider+`<div class="message-row ${escape(m.direction)}" data-message-id="${m.id}">${avatar(outgoing?'我':sender|| (m.direction==='incoming'?current().lookup:'?'),outgoing?current().self_avatar_url:isGroup(current())?null:m.direction==='incoming'?current().avatar_url:null)}<div class="message-column">${sender?`<div class="group-message-sender">${escape(sender)}${m.mention_me&&m.mention_verified?'<span class="group-tag">@我</span>':''}</div>`:''}<div class="message-bubble">${body}</div><div class="message-meta ${['uncertain','failed'].includes(m.status)?'error':''}">${labels.map(escape).join(' · ')}</div>${m.error?`<p class="message-error">${escape(m.error)}</p>`:''}</div></div>`;
   }).join(''):'<div class="list-empty">这里还没有消息<br>开启监听后会同步当前窗口可见消息</div>');
   if(force||nearBottom)box.scrollTop=box.scrollHeight;else box.scrollTop=oldTop;
   if($('load-older'))$('load-older').onclick=loadOlder;
@@ -222,16 +225,17 @@ $('retry-listener').onclick=()=>{if(current())patchContact(state.selected,{liste
 $('pause-button').onclick=async()=>{try{state.status=await api('/api/runtime/pause',{method:'POST',body:{paused:!state.status.paused}});render();}catch(error){toast(error.message,true);}};
 $('reconnect').onclick=async()=>{const b=$('reconnect');b.disabled=true;try{state.status=await api('/api/runtime/reconnect',{method:'POST'});render();toast('连接正在重新建立');}catch(error){toast(error.message,true);}finally{b.disabled=false;}};
 
-function openAdd() {$('contact-error').hidden=true;$('contact-dialog').showModal();$('contact-lookup').focus();}
+function openAdd() {$('contact-error').hidden=true;contactKindChanged();$('contact-dialog').showModal();$('contact-lookup').focus();}
 $('add-contact').onclick=$('empty-add').onclick=openAdd;
 document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
 $('contact-form').onsubmit=async e=>{
   e.preventDefault();const submit=$('contact-submit');if(submit.disabled)return;
   submit.disabled=true;$('contact-progress').hidden=false;$('contact-error').hidden=true;
+  const group=$('contact-type').value==='group';$('contact-progress').textContent=group?'正在核验微信群聊，请稍候…':'正在读取微信个人资料，请稍候…';
   try {
-    const contact=await api('/api/contacts',{method:'POST',body:{lookup:$('contact-lookup').value,wechat_id:$('contact-wechat').value}});
+    const contact=await api('/api/contacts',{method:'POST',body:newContactBody()});
     if($('contact-auto-listen').checked)await api(`/api/contacts/${contact.id}`,{method:'PATCH',body:{listening:true}});
-    $('contact-dialog').close();$('contact-form').reset();await sync();await selectContact(contact.id);toast('联系人身份核验通过，已添加');
+    $('contact-dialog').close();$('contact-form').reset();contactKindChanged();await sync();await selectContact(contact.id);toast(group?'群聊已核验并添加，回复将发送到原群':'联系人身份核验通过，已添加');
   }catch(error){$('contact-error').textContent=error.message;$('contact-error').hidden=false;}
   finally{submit.disabled=false;$('contact-progress').hidden=true;}
 };
@@ -239,21 +243,21 @@ function renderContacts() {
   const query=$('contact-search').value.trim().toLowerCase();
   const rows=state.contacts.filter(c=>`${c.lookup} ${c.nickname} ${c.wechat_id}`.toLowerCase().includes(query));
   $('contacts-empty').hidden=rows.length>0;
-  $('contacts-table').innerHTML=rows.map(c=>`<tr><td><div class="table-person">${avatar(c.lookup,c.avatar_url)}<div><strong>${escape(c.lookup)}</strong><p>${escape(c.nickname)}</p></div></div></td><td>${escape(c.wechat_id)}</td><td><button class="switch" role="switch" aria-label="切换 ${escape(c.lookup)} 的监听" aria-checked="${!!c.listening}" data-toggle="${escape(c.id)}"><span></span></button></td><td><span class="pill">${escape(modeLabels[c.mode]||c.mode)}</span></td><td><div class="table-actions"><button class="text-button" data-open="${escape(c.id)}">进入聊天</button><button class="icon-button" data-delete="${escape(c.id)}" aria-label="移除 ${escape(c.lookup)}">${icon('trash')}</button></div></td></tr>`).join('');
+  $('contacts-table').innerHTML=rows.map(c=>`<tr><td><div class="table-person">${avatar(c.lookup,c.avatar_url)}<div><strong>${escape(c.lookup)}${isGroup(c)?'<span class="group-tag">群聊</span>':''}</strong><p>${escape(isGroup(c)?groupSummary(c):c.nickname)}</p></div></div></td><td>${escape(isGroup(c)?'群聊 · 按群名核验':c.wechat_id)}</td><td><button class="switch" role="switch" aria-label="切换 ${escape(c.lookup)} 的监听" aria-checked="${!!c.listening}" data-toggle="${escape(c.id)}"><span></span></button></td><td><span class="pill">${escape(modeLabels[c.mode]||c.mode)}</span></td><td><div class="table-actions"><button class="text-button" data-open="${escape(c.id)}">进入聊天</button><button class="icon-button" data-delete="${escape(c.id)}" aria-label="移除 ${escape(c.lookup)}">${icon('trash')}</button></div></td></tr>`).join('');
 }
 $('contact-search').oninput=renderContacts;
 $('contacts-table').onclick=e=>{
   const open=e.target.closest('[data-open]'),toggle=e.target.closest('[data-toggle]'),del=e.target.closest('[data-delete]');
   if(open)selectContact(open.dataset.open);
   if(toggle){const c=state.contacts.find(c=>c.id===toggle.dataset.toggle);if(c)patchContact(c.id,{listening:!c.listening});}
-  if(del){state.deleteId=del.dataset.delete;const c=state.contacts.find(c=>c.id===state.deleteId);$('delete-description').textContent=`确定从工作台移除“${c.lookup}”吗？微信中的好友关系不受影响。`;$('delete-dialog').showModal();}
+  if(del){state.deleteId=del.dataset.delete;const c=state.contacts.find(c=>c.id===state.deleteId);$('delete-description').textContent=`确定从工作台移除“${c.lookup}”吗？微信中的好友关系或群聊不受影响。`;$('delete-dialog').showModal();}
 };
 $('delete-form').onsubmit=async e=>{e.preventDefault();try{await api(`/api/contacts/${state.deleteId}`,{method:'DELETE'});$('delete-dialog').close();await sync();toast('联系人已移除');}catch(error){toast(error.message,true);}};
-$('demo-inject').onclick=async()=>{const id=state.selected,text=$('demo-message').value;if(!id||!text.trim())return;try{await api(`/api/demo/${id}/incoming`,{method:'POST',body:{text}});$('demo-message').value='';toast('演示消息已注入');}catch(error){toast(error.message,true);}};
+$('demo-inject').onclick=async()=>{const id=state.selected,text=$('demo-message').value;if(!id||!text.trim())return;try{await api(`/api/demo/${id}/incoming`,{method:'POST',body:demoIncomingBody(text)});$('demo-message').value='';toast('演示消息已注入');}catch(error){toast(error.message,true);}};
 
 async function renderStatus() {
   const s=state.status;
-  $('status-cards').innerHTML=`<article class="status-card"><h3>${icon('chat')}微信连接</h3><strong>${s.demo?'演示环境':s.state==='ready'?'已连接':'尚未就绪'}</strong><p>${escape(s.detail||'正在连接')}<br>${s.version?'版本 '+escape(s.version):'等待读取微信版本'}</p></article><article class="status-card"><h3>${icon('activity')}消息监听</h3><strong>${state.contacts.filter(c=>c.listening&&['listening','background'].includes(c.listener_state)).length} <small>位联系人</small></strong><p>${s.paused?'全部监听已暂停':'仅同步你主动添加的联系人'}<br>${state.contacts.filter(c=>c.listener_state==='error').length} 个监听异常</p></article><article class="status-card"><h3>${icon('send')}发送队列</h3><strong>${s.queue_size||0} <small>条待发送</small></strong><p>${s.busy?'正在执行发送操作':'当前没有发送中的消息'}<br>结果不确定时停止自动重发</p></article>`;
+  $('status-cards').innerHTML=`<article class="status-card"><h3>${icon('chat')}微信连接</h3><strong>${s.demo?'演示环境':s.state==='ready'?'已连接':'尚未就绪'}</strong><p>${escape(s.detail||'正在连接')}<br>${s.version?'版本 '+escape(s.version):'等待读取微信版本'}</p></article><article class="status-card"><h3>${icon('activity')}消息监听</h3><strong>${state.contacts.filter(c=>c.listening&&['listening','background'].includes(c.listener_state)).length} <small>个会话</small></strong><p>${s.paused?'全部监听已暂停':'仅同步你添加的私聊与群聊'}<br>${state.contacts.filter(c=>c.listener_state==='error').length} 个监听异常</p></article><article class="status-card"><h3>${icon('send')}发送队列</h3><strong>${s.queue_size||0} <small>条待发送</small></strong><p>${s.busy?'正在执行发送操作':'当前没有发送中的消息'}<br>结果不确定时停止自动重发</p></article>`;
   try {
     const events=await api('/api/activity');
     const names=Object.fromEntries(state.contacts.map(c=>[c.id,c.lookup]));
@@ -303,4 +307,5 @@ window.addEventListener('beforeunload',()=>state.stream?.close());
 setInterval(()=>{if(document.visibilityState==='visible')sync();},15000);
 initAI({api,escape,toast,state,current,patchContact,setView});
 initVoice({api,toast,current,patchContact});
+initGroups({api,toast,current,sync});
 sync();

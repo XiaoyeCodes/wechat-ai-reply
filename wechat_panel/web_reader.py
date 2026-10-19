@@ -117,7 +117,10 @@ def read_page(url, platform_routing=True):
                     from bs4 import BeautifulSoup
                     soup=BeautifulSoup(text,'html.parser')
                     for el in soup(['script','style','nav','footer','header','noscript']):el.decompose()
-                    body=soup.find('article') or soup.find('main') or soup
+                    # AIHot /hot is a ranking with ten article/li cards. Taking
+                    # its first article silently drops nine titles and heats.
+                    ranking=host=='aihot.news' and urlsplit(target).path.rstrip('/')=='/hot'
+                    body=(soup.find('main') or soup) if ranking else (soup.find('article') or soup.find('main') or soup)
                     text=body.get_text('\n',strip=True)
                 elif not any(m in mime for m in ('text/','application/json')):raise ReadUnavailable('该链接不是可读取的网页正文')
                 if len(text.strip())<30:raise ReadUnavailable('网页正文为空或需要登录，无法据此总结')

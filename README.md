@@ -81,6 +81,7 @@ Relay 是一个运行在 Windows 本机的微信管理面板。它通过桌面 U
 | --- | --- |
 | **聊天工作台** | 实时消息列表、人工回复、快捷发送、发送状态与异常提示 |
 | **联系人管理** | 备注与微信号核验、头像缓存、搜索、独立监听开关 |
+| **群聊监听** | 添加群聊、指定成员、仅 @ 本人或成员发言触发；文字与图片回复原群，按群和成员隔离上下文 |
 | **消息监听** | 复用独立聊天窗；自动重连；窗口最小化后可托管到屏幕外继续读取 |
 | **AI 回复** | 人工、仅监听、AI 辅助、AI 自动回复四种会话模式 |
 | **多 Agent** | 每位联系人独立绑定 Agent；本地流程、外部 HTTP Agent、Hermes 或 Vibe-Trading 原生引擎 |
@@ -95,6 +96,7 @@ Relay 是一个运行在 Windows 本机的微信管理面板。它通过桌面 U
 | **Skill** | 标准技能包导入、附件读取、按 Agent 绑定，通过已授权工具执行步骤 |
 | **MCP** | Streamable HTTP、真实工具发现与导入、独立连接配置、密钥加密 |
 | **主动关怀** | 一次性 / Cron 日程、时区、免打扰、次数限制与用户授权 |
+| **Agent 定时任务** | 一次性 / 每日 / 每周 / Cron 执行，公共结果生成一次，向绑定该 Agent、已监听且开启 AI 自动回复的联系人推送；逐人投递记录 |
 | **多模态** | 图片理解、TTS；[Codex / ChatGPT 账号生图](docs/codex-images.md) 支持文生图与图生图，自动回复直接发回微信，测试台可预览与下载 |
 | **调试与观测** | 独立测试会话、运行轨迹、审批记录、外部观测连接 |
 
@@ -429,9 +431,11 @@ node scripts/capture-readme.cjs
 ## 文档与反馈
 
 - [微信连接与消息可靠性](docs/wechat-connection.md)
+- [群聊监听与原群回复](docs/group-chats.md)
 - [陪伴、记忆、语音、图片及外部服务](docs/companion-services.md)
 - [高德 MCP 与 TreeMind 配置](docs/mcp-connections.md)
 - [外部 Agent 与入站事件接口](docs/agent-api.md)
+- [Agent 定时任务与公共结果推送](docs/agent-schedules.md)
 - [Hermes 电脑助手与 Skill 执行](docs/hermes.md)
 - [原生新闻技能与 DeepSeek 搜索](docs/deepseek-news.md)
 - [提交问题或建议](https://github.com/XiaoyeCodes/wechat-ai-reply/issues)

@@ -112,7 +112,10 @@ def _worker_main(commands, output, demo, instances, state_path=None):
             if op == 'configure':
                 new = {c['id']: c for c in command['contacts']}
                 for cid in list(contacts):
-                    if cid not in new or not new[cid]['listening']:
+                    group_fields=('chat_type','lookup','account_id','group_members','group_self_name','group_self_name_verified','group_mention_only')
+                    group_changed=(cid in new and any(contacts[cid].get(k)!=new[cid].get(k) for k in group_fields)
+                        and ('group' in (contacts[cid].get('chat_type'),new[cid].get('chat_type'))))
+                    if cid not in new or not new[cid]['listening'] or group_changed:
                         if bridge:
                             bridge.detach(cid)
                         attached.discard(cid)
@@ -147,6 +150,10 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                     raise RuntimeError(health['detail'])
                 if op == 'inspect':
                     result = bridge.inspect(command['lookup'], command['wechat_id'])
+                    probe()
+                elif op == 'inspect_group':
+                    result=bridge.inspect_group(command['lookup'],command.get('group_members',[]),
+                        command.get('group_self_name',''),command.get('account_id'))
                     probe()
                 elif op == 'probe':
                     if command.get('reveal'):
@@ -211,7 +218,9 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                             raise RuntimeError('真实模式不能注入测试消息')
                         if not contact['listening'] or contact['id'] not in attached:
                             raise RuntimeError('请先开启该联系人的监听')
-                        result = bridge.inject(contact, command['text'])
+                        result = (bridge.inject(contact,command['text'],sender=command.get('sender',''),
+                            mention_me=command.get('mention_me',False)) if contact.get('chat_type')=='group'
+                            else bridge.inject(contact,command['text']))
                 else:
                     raise RuntimeError('未知的微信操作')
                 emit('result', request_id=command['request_id'], result=result,

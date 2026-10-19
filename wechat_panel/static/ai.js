@@ -1,6 +1,6 @@
 import {artworkFor,artworkHTML,syncContactArtwork} from './agent-art.js?v=3';
 import {initMCP,mcpFields,bindMCPFields,readMCP,mcpCard,discoverMCP} from './mcp.js';
-import {initCompanion,setCompanionData,agentFields,bindAgentFields,readAgentFields,serviceFields,bindServiceFields,readService,renderExtraTab,sessionFor,scopeFor,serviceDrivers} from './companion.js?v=codex-images-1';
+import {initCompanion,setCompanionData,agentFields,bindAgentFields,readAgentFields,serviceFields,bindServiceFields,readService,renderExtraTab,sessionFor,scopeFor,serviceDrivers} from './companion.js?v=agent-schedules-1';
 import {skillFields,bindSkillFields,readSkill} from './skills.js';
 import {hermesFields,readHermes,bindHermes} from './hermes.js';
 import {vibeFields,readVibe} from './vibe.js?v=sparkflow-parity-2';
@@ -14,8 +14,8 @@ const labels={mcp:'MCP 连接',agents:'Agent',providers:'模型连接',knowledge
 const descriptions={mcp:'连接高德与外部 MCP，发现真实工具后按 Agent 授权；没有配置的服务不会被调用。',agents:'同一个 Agent 可以分配给多位联系人，每段对话保持独立上下文。',providers:'填写自己的模型接口、API Key 和模型 ID，保存后测试连接。',knowledge:'导入文本或 Markdown，按 Agent 分配资料，回复时按内容检索。',tools:'预设查询可自动执行，其他调用先在面板确认。',runs:'查看生成过程、知识引用、工具确认和微信发送结果。'};
 Object.assign(labels,{skills:'技能',connectors:'连接器',tools:'工具与权限',providers:'模型管理',preferences:'回复设置',schedules:'自动任务',services:'服务连接'});
 Object.assign(descriptions,{connectors:'集中管理搜索、语音、绘图与外部服务；配置完成后，在 Agent 中选择使用。',preferences:'设置近期上下文与连续消息的处理方式。'});
-Object.assign(descriptions,{skills:'导入标准技能包，按 Agent 绑定，按任务调用已有工具完成步骤。',services:'连接记忆、搜索、语音、图像与观测服务，填入自己的地址和密钥后测试。',memory:'按 Agent 与用户查看事实、摘要、情绪及关怀授权。',schedules:'在合适的时间主动问候，遵守用户授权与免打扰时间。'});
-const statuses={pending:'等待处理',running:'正在处理',waiting_approval:'等待工具确认',draft:'回复待确认',queued:'等待微信发送',sent:'微信已核对',completed:'测试完成',failed:'处理失败',cancelled:'已取消',uncertain:'结果待核对'};
+Object.assign(descriptions,{skills:'导入标准技能包，按 Agent 绑定，按任务调用已有工具完成步骤。',services:'连接记忆、搜索、语音、图像与观测服务，填入自己的地址和密钥后测试。',memory:'按 Agent 与用户查看事实、摘要、情绪及关怀授权。',schedules:'安排 Agent 定时执行任务并分享结果，也可以管理联系人的关怀日程。'});
+const statuses={pending:'等待处理',running:'正在处理',waiting_approval:'等待工具确认',draft:'回复待确认',queued:'等待微信发送',sent:'微信已核对',completed:'已完成',failed:'处理失败',cancelled:'已取消',uncertain:'结果待核对'};
 const stepNames={knowledge:'检索知识库',model:'模型处理',tool:'固定工具调用',reply:'输出回复'};
 const esc=x=>ctx.escape(x);
 const find=(kind,id)=>data?.[kind]?.find(x=>x.id===id)||(kind==='tools'&&({'hermes:task':{name:'Hermes 电脑任务'},'hermes:tool':{name:'Hermes 工具操作'}})[id]);
@@ -30,7 +30,7 @@ const checks=(kind,selected)=>`<div class="ai-check-grid">${(data[kind]||[]).map
 export function initAI(context){
   ctx=context;
   initMCP(context,refreshAI);
-  initCompanion({...context,refresh:refreshAI});
+  initCompanion({...context,refresh:refreshAI,openRun});
   const navigate=next=>{tab=next;lastTabs[sectionFor(tab)]=tab;renderLibrary();};
   $('ai-tabs').onclick=e=>{const b=e.target.closest('[data-ai-section]');if(b)navigate(lastTabs[b.dataset.aiSection]||sections[b.dataset.aiSection].tabs[0]);};
   $('ai-subtabs').onclick=e=>{const b=e.target.closest('[data-ai-tab]');if(b)navigate(b.dataset.aiTab);};
@@ -163,12 +163,13 @@ export function renderContactAI(){
   if(!ctx||!data)return;const c=ctx.current();if(!c)return;
   const el=$('contact-agent');
   if(document.activeElement!==el){
-    const hasAgent=!!find('agents',c.ai_agent_id);
-    const placeholder=hasAgent?'':`<option value="" disabled hidden>${data.agents.length?'请选择 Agent':'请先创建 Agent'}</option>`;
-    const html=placeholder+options('agents',c.ai_agent_id,null);
+    const available=data.agents.filter(a=>c.chat_type!=='group'||a.kind==='workflow');
+    const hasAgent=available.some(a=>a.id===c.ai_agent_id);
+    const placeholder=hasAgent?'':`<option value="" disabled hidden>${available.length?'请选择 Agent':c.chat_type==='group'?'请先创建工作流 Agent':'请先创建 Agent'}</option>`;
+    const html=placeholder+available.map(a=>`<option value="${esc(a.id)}" ${a.id===c.ai_agent_id?'selected':''}>${esc(a.name)}</option>`).join('');
     if(el.innerHTML!==html)el.innerHTML=html;
     el.value=hasAgent?c.ai_agent_id:'';
-    el.disabled=!data.agents.length;
+    el.disabled=!available.length;
   }
   $('ai-mode-hint').textContent={manual:'你直接回复。AI 不会处理这个会话的新消息。',listen_only:'只同步消息，不发送回复。',ai_assist:'AI 生成草稿，经你编辑确认后发送。',ai_auto:'新入站消息由所选 Agent 自动回复；人工发送会取消本轮 AI 回复。'}[c.mode];
   const agent=find('agents',c.ai_agent_id);
@@ -312,7 +313,7 @@ async function renderRun(run,target){
   }
   $(target).dataset.runId=run.id;
   const prefix=target==='ai-run-detail'?'ai-draft-text':'ai-test-reply';
-  $(target).innerHTML=`<div class="ai-run-heading"><span class="pill ${run.status==='waiting_approval'?'amber':'green'}">${esc(statuses[run.status]||run.status)}</span><span>${esc(find('agents',run.agent_id)?.name||'Agent')}${run.dry_run?' · 不发送微信':''}</span></div><p class="ai-run-input">${esc(run.input)}</p>${run.error?`<p class="form-error">${esc(run.error)}</p>`:''}${run.reply?`<label class="ai-field"><span>回复正文</span><textarea id="${prefix}" rows="5" ${run.status==='draft'?(find('agents',run.agent_id)?.vibe_engine==='sparkflow'?'maxlength="16000"':'maxlength="1999"'):'readonly'}>${esc(run.reply)}</textarea></label>`:''}${run.status==='draft'?`<button class="button primary" data-send-draft="${esc(run.id)}">确认并发送微信</button>`:''}${run.approvals.filter(a=>a.status==='pending').map(a=>`<div class="ai-approval"><h3>${a.tool_id.startsWith('hermes:')?'电脑任务确认':'工具请求 · '+esc(find('tools',a.tool_id)?.name||a.tool_id)}</h3>${a.tool_id.startsWith('hermes:')?`<p style="white-space:pre-line">${esc(a.summary||'准备完成：'+run.input)}</p><details><summary>查看技术详情</summary><pre>${esc(JSON.stringify(a.arguments,null,2))}</pre></details>`:`<pre>${esc(JSON.stringify(a.arguments,null,2))}</pre>`}<p>${a.tool_id.startsWith('hermes:')&&run.approval_scope==='task'?'确认后连续完成本次任务，后续步骤不再逐步确认。':'批准后执行这一次调用，并继续原有流程。'}</p><button class="button primary" data-approve="${esc(a.id)}">批准执行</button><button class="button secondary" data-reject="${esc(a.id)}">拒绝</button></div>`).join('')}<div class="ai-trace"><h3>处理过程</h3>${run.trace.map((t,i)=>`<details><summary><span>${String(i+1).padStart(2,'0')}</span>${esc(t.step)}<time>${new Date(t.created_at).toLocaleTimeString('zh-CN')}</time></summary><pre>${esc(JSON.stringify(t.detail,null,2))}</pre></details>`).join('')||'<p class="field-hint">正在等待处理…</p>'}</div>${['pending','running','waiting_approval','draft','queued'].includes(run.status)?`<button class="text-button ai-cancel-run" data-cancel-run="${esc(run.id)}">取消此任务</button>`:''}`;
+  $(target).innerHTML=`<div class="ai-run-heading"><span class="pill ${run.status==='waiting_approval'?'amber':'green'}">${esc(statuses[run.status]||run.status)}</span><span>${esc(find('agents',run.agent_id)?.name||'Agent')}${run.mode==='agent_task'?' · 定时任务生成结果':run.dry_run?' · 不发送微信':''}</span></div><p class="ai-run-input">${esc(run.input)}</p>${run.error?`<p class="form-error">${esc(run.error)}</p>`:''}${run.reply?`<label class="ai-field"><span>回复正文</span><textarea id="${prefix}" rows="5" ${run.status==='draft'?(find('agents',run.agent_id)?.vibe_engine==='sparkflow'?'maxlength="16000"':'maxlength="1999"'):'readonly'}>${esc(run.reply)}</textarea></label>`:''}${run.status==='draft'?`<button class="button primary" data-send-draft="${esc(run.id)}">确认并发送微信</button>`:''}${run.approvals.filter(a=>a.status==='pending').map(a=>`<div class="ai-approval"><h3>${a.tool_id.startsWith('hermes:')?'电脑任务确认':'工具请求 · '+esc(find('tools',a.tool_id)?.name||a.tool_id)}</h3>${a.tool_id.startsWith('hermes:')?`<p style="white-space:pre-line">${esc(a.summary||'准备完成：'+run.input)}</p><details><summary>查看技术详情</summary><pre>${esc(JSON.stringify(a.arguments,null,2))}</pre></details>`:`<pre>${esc(JSON.stringify(a.arguments,null,2))}</pre>`}<p>${a.tool_id.startsWith('hermes:')&&run.approval_scope==='task'?'确认后连续完成本次任务，后续步骤不再逐步确认。':'批准后执行这一次调用，并继续原有流程。'}</p><button class="button primary" data-approve="${esc(a.id)}">批准执行</button><button class="button secondary" data-reject="${esc(a.id)}">拒绝</button></div>`).join('')}<div class="ai-trace"><h3>处理过程</h3>${run.trace.map((t,i)=>`<details><summary><span>${String(i+1).padStart(2,'0')}</span>${esc(t.step)}<time>${new Date(t.created_at).toLocaleTimeString('zh-CN')}</time></summary><pre>${esc(JSON.stringify(t.detail,null,2))}</pre></details>`).join('')||'<p class="field-hint">正在等待处理…</p>'}</div>${['pending','running','waiting_approval','draft','queued'].includes(run.status)?`<button class="text-button ai-cancel-run" data-cancel-run="${esc(run.id)}">取消此任务</button>`:''}`;
   if(run.status==='draft'&&editedDrafts.has(run.id)&&target==='ai-run-detail')$('ai-draft-text').value=editedDrafts.get(run.id);
   if(run.pdf){
     $(target).insertAdjacentHTML('afterbegin',`<p><a class="button secondary" href="${esc(run.pdf.url)}" target="_blank" rel="noopener">下载 PDF · ${esc(run.pdf.name)}</a></p>`);

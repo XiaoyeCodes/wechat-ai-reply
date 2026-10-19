@@ -33,6 +33,23 @@ BUILTINS=[
 ]
 
 
+def explicitly_requested(state, text):
+    """A named, bound skill owns its tool sequence before generic shortcuts."""
+    normalize=lambda value: re.sub(r'\s+', '', value).casefold()
+    query=normalize(text)
+    for skill in state['snapshot'].get('skills',{}).values():
+        if not skill.get('enabled'):continue
+        name=skill['name']
+        # These source-specific news skills also accept the user's short intent
+        # names, so generic news/image routes do not run before their fetch step.
+        if name in ('Ai热点新闻','ai-hot-news') and re.search(r'(?:AI|人工智能)\s*(?:热点|热榜|热搜)|AIHot',text,re.I):return True
+        if name in ('每日AI新闻','ai-bot-daily-news') and re.search(r'(?:每日|今日|今天|最新)\s*(?:AI|人工智能)\s*(?:新闻|资讯|日报)|AI\s*日报|AI工具集',text,re.I):return True
+        # Imported display names can append an English package id in brackets.
+        labels=[name,*re.split(r'[（()）]',name)]
+        if any(len(normalize(label))>=4 and normalize(label) in query for label in labels):return True
+    return False
+
+
 def catalog(state):
     skills=state['snapshot'].get('skills',{})
     if not skills:return ''

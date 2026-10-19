@@ -79,6 +79,11 @@ def deliver(bridge,store,message,contact,*,demo=False):
         voice_revision=MiniMaxVoice(store).config()['revision']
     use_voice=(message.get('origin')=='ai' and message['kind'] in ('text','voice')
                and current.get('reply_format')=='voice')
+    if use_voice and message.get('ai_run_id'):
+        from .ai_store import AIStore
+        # Shared task results keep the same text/image presentation for all
+        # recipients, rather than performing per-contact voice generation.
+        if AIStore(store).run(message['ai_run_id'])['state'].get('agent_schedule'):use_voice=False
     text=speech_text(message['text']) if use_voice else None
     fallback='内容较长或包含链接、列表，保留完整文字' if use_voice and not text else ''
     def ensure_current():

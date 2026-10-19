@@ -168,22 +168,40 @@ class DemoBridge:
         return validate_identity(dict(lookup=lookup, nickname=lookup, wechat_id=expected_id,
                                       account_id='demo-account'), lookup, expected_id, account_id)
 
+    def inspect_group(self, lookup, group_members=None, group_self_name='', account_id=None):
+        from .group_bridge import group_key, validate_group_profile
+        profile=dict(lookup=lookup,nickname=lookup,wechat_id=group_key('demo-account',lookup),
+            account_id='demo-account',chat_type='group',group_members=list(group_members or []),
+            group_self_name=group_self_name or '演示账号',group_mention_only=True,
+            group_self_name_source='user_config' if group_self_name else 'demo',
+            group_identity_verified=True,group_members_verified=True,group_self_name_verified=True)
+        return validate_group_profile(profile,lookup,account_id,group_members,group_self_name)
+
     def attach(self, contact, for_send=False):
-        self.inspect(contact['lookup'], contact['wechat_id'], contact['account_id'])
+        if contact.get('chat_type')=='group':
+            self.inspect_group(contact['lookup'],contact.get('group_members'),contact.get('group_self_name',''),contact['account_id'])
+        else:self.inspect(contact['lookup'], contact['wechat_id'], contact['account_id'])
         return self.history.setdefault(contact['id'], [])
 
     def snapshot(self, contact):
         return list(self.history.setdefault(contact['id'], []))
 
-    def inject(self, contact, text, direction='incoming'):
+    def inject(self, contact, text, direction='incoming',sender='',mention_me=False):
         self.counter += 1
         item = dict(key=f'demo:{self.session}:{self.counter}', text=text, kind='text', direction=direction,
                     account_id='demo-account')
+        if contact.get('chat_type')=='group':
+            item.update(sender=sender if direction=='incoming' else contact.get('group_self_name','演示账号'),
+                sender_verified=bool(sender) or direction=='outgoing',mention_me=bool(mention_me),
+                mention_verified=bool(sender),mention_source='demo')
+            item['identity_text']=json.dumps([item['sender'],text],ensure_ascii=False)
         self.history.setdefault(contact['id'], []).append(item)
         return item
 
     def send(self, contact, text):
-        self.inspect(contact['lookup'], contact['wechat_id'], contact['account_id'])
+        if contact.get('chat_type')=='group':
+            self.inspect_group(contact['lookup'],contact.get('group_members'),contact.get('group_self_name',''),contact['account_id'])
+        else:self.inspect(contact['lookup'], contact['wechat_id'], contact['account_id'])
         return self.inject(contact, text, 'outgoing')['key']
 
     def send_file(self, contact, path):
@@ -245,6 +263,7 @@ class WeixinBridge:
         self.image_pending = {}
         self.avatar_cache = {}
         self.search_avatar = None
+        self.group_rosters = {}
         self.trace_path = Path(os.environ.get('WECHAT_PANEL_DATA_DIR') or Path(__file__).resolve().parents[1] / '.panel-data') / 'ui-actions.jsonl'
         self.account_path = self.trace_path.with_name('wechat-account.json')
         # Native Qt captions become "Weixin" for both main and independent
@@ -498,6 +517,12 @@ class WeixinBridge:
             point = (rect.mid_point().x, rect.mid_point().y)
             hit = win32gui.GetAncestor(win32gui.WindowFromPoint(point), 2)
             if hit == root:
+                if contact and contact.get('chat_type')=='group' and action.endswith('send_once'):
+                    target=self.windows.get(contact['id'])
+                    self._check_account(contact)
+                    if target is None or self._title(target)!=contact['lookup']:
+                        raise BridgeError('发送前群聊目标已变化，已停止操作')
+                    self._check_chat_type(target,contact)
                 if action in ('ui.input.focus','ui.send_once') and win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)!=root:
                     raise DesktopBusy('用户正在切换窗口，等待空闲后重试')
                 self._record(action, contact)
@@ -621,7 +646,7 @@ class WeixinBridge:
             raise BridgeError('无法唯一识别微信搜索框')
         return searches[-1]
 
-    def _search_unique(self, lookup):
+    def _search_unique(self, lookup, chat_type='direct'):
         if self.health()['state'] not in ('ready', 'hidden'):
             raise BridgeError('微信当前不可操作，请在运行状态中检查连接')
         main = self._open_main()
@@ -648,8 +673,8 @@ class WeixinBridge:
         deadline = time.monotonic()+2
         while self._title(main) != lookup and time.monotonic() < deadline:
             time.sleep(0.1)
-        if self._title(main) != lookup or self.Tools.is_group_chat(main):
-            raise BridgeError('打开的不是目标单人聊天，已停止操作')
+        if self._title(main) != lookup or bool(self.Tools.is_group_chat(main)) != (chat_type=='group'):
+            raise BridgeError('打开的会话名称或类型与目标不一致，已停止操作')
         # The title can update before the narrow page finishes switching.
         # Wait for the actual chat input, not a retained/hidden title node.
         main.child_window(**self.Edits.CurrentChatEdit).wait('visible', timeout=3)
@@ -716,6 +741,22 @@ class WeixinBridge:
         self.verified_contacts.add((actual_account, expected_id, lookup))
         return profile
 
+    def inspect_group(self, lookup, group_members=None, group_self_name='', account_id=None):
+        from .group_bridge import inspect_group
+        return inspect_group(self,lookup,group_members,group_self_name,account_id)
+
+    def _check_chat_type(self, window, contact):
+        from .group_bridge import group_key
+        is_group=contact.get('chat_type')=='group'
+        # Legacy fake direct-chat adapters need not expose Tools; a real bridge
+        # always does, so live direct/group confusion is rejected both ways.
+        detector=getattr(getattr(self,'Tools',None),'is_group_chat',None)
+        if detector and bool(detector(window)) != is_group:
+            raise BridgeError('聊天窗口类型与保存的联系人/群聊绑定不一致')
+        if is_group and not detector:raise BridgeError('无法核验目标窗口的群聊类型')
+        if is_group and contact.get('wechat_id')!=group_key(contact['account_id'],contact['lookup']):
+            raise BridgeError('群聊内部绑定标识不匹配，请重新添加核验')
+
     def _check_account(self, contact):
         if (not self.account_hint or self.Tools.get_current_wxid() != self.account_hint
                 or self.account_id != contact['account_id']):
@@ -731,12 +772,13 @@ class WeixinBridge:
                       if w.process_id() == pid and self._title(w) == contact['lookup']]
         if len(candidates) > 1:
             raise BridgeError('存在多个同名独立聊天窗口，请关闭重复窗口后重试')
+        if candidates and contact.get('chat_type')=='group':self._check_chat_type(candidates[0],contact)
         return candidates[0] if candidates else None
 
     def _open_dialog(self, contact):
         import pyautogui
         # Reconnection is one search followed by one session double-click.
-        main = self._search_unique(contact['lookup'])
+        main = self._search_unique(contact['lookup'],chat_type='group') if contact.get('chat_type')=='group' else self._search_unique(contact['lookup'])
         self._focus(main, contact)
         time.sleep(0.25)  # Search can expose the old sessions during Qt's page switch.
         listing = main.child_window(**self.Main.SessionList)
@@ -779,6 +821,7 @@ class WeixinBridge:
             self._check_account(contact)
             if existing.class_name() != 'mmui::ChatSingleWindow' or self._title(existing) != contact['lookup']:
                 raise BridgeError('绑定窗口的联系人发生变化，请重新核验')
+            self._check_chat_type(existing,contact)
             if for_send:
                 self._focus(existing, contact)
             return self.snapshot(contact)
@@ -794,6 +837,11 @@ class WeixinBridge:
             window = self._open_dialog(contact)
         if self._title(window) != contact['lookup']:
             raise BridgeError('独立聊天窗口与联系人绑定不一致')
+        self._check_chat_type(window,contact)
+        if contact.get('chat_type')=='group':
+            key=(contact['account_id'],contact['wechat_id'],contact['lookup'])
+            if key not in self.profiles:
+                self.inspect_group(contact['lookup'],contact.get('group_members'),contact.get('group_self_name',''),contact['account_id'])
         if for_send:
             self._focus(window, contact)
         self.windows[contact['id']] = window
@@ -867,7 +915,7 @@ class WeixinBridge:
             except Exception:
                 pass
             if locate and key not in self.avatar_cache and not contact.get('avatar_url'):
-                self._search_unique(contact['lookup'])
+                self._search_unique(contact['lookup'],chat_type='group') if contact.get('chat_type')=='group' else self._search_unique(contact['lookup'])
                 if self.search_avatar and self.search_avatar[0] == contact['lookup']:
                     self._check_account(contact)
                     self.avatar_cache[key] = self.search_avatar[1]
@@ -909,6 +957,13 @@ class WeixinBridge:
     def _direction(self, item, window, contact, frame=None, visible_bounds=None):
         text = item.window_text()
         if item.element_info.control_type == 'CheckBox':
+            if contact.get('chat_type')=='group':
+                from .group_bridge import observe_group_row
+                names=getattr(self,'group_rosters',{}).get((contact['account_id'],contact['wechat_id']))
+                evidence=observe_group_row(item,contact,'incoming',text,names)
+                if evidence['sender_verified']:
+                    return ('outgoing' if evidence['sender']==contact.get('group_self_name') else 'incoming'),evidence['text']
+                return 'unknown',text
             return parse_sender(text, {contact['lookup'], contact['nickname']}, self.account_name)
         avatars = [x for x in item.descendants() if any(label in x.class_name().lower()
                    for label in ('avatar', 'headview', 'headimage'))]
@@ -943,6 +998,7 @@ class WeixinBridge:
         if window.class_name() != 'mmui::ChatSingleWindow' or title != contact['lookup']:
             raise BridgeError('监听窗口标题变化，需重新核验联系人')
         self._check_account(contact)
+        self._check_chat_type(window,contact)
         if self.window_host.ensure(window.handle, contact):
             self._record('ui.background', contact, handle=window.handle)
             time.sleep(0.15)  # Qt must lay out rows at the new native position.
@@ -989,6 +1045,15 @@ class WeixinBridge:
             items.append(dict(key=key, text=text,
                               direction=direction, kind=kind, account_id=contact['account_id'],
                               direction_verified=direction in ('incoming','outgoing')))
+            if contact.get('chat_type')=='group':
+                from .group_bridge import observe_group_row
+                names=getattr(self,'group_rosters',{}).get((contact['account_id'],contact['wechat_id']))
+                evidence=observe_group_row(row,contact,direction,text,names)
+                items[-1].update(evidence)
+                # Sender identity is part of the raw content identity too;
+                # Qt can recycle a runtime ID for another member's same text.
+                identity_digest=hashlib.sha256(evidence['identity_text'].encode()).hexdigest()[:16]
+                items[-1]['key']=key=f'{window.handle}:{runtime}:{identity_digest}'
             if photo:items[-1]['image_data']=photo
             if kind=='text' and direction=='incoming':
                 from .wechat_fulltext import folded
@@ -1060,6 +1125,7 @@ class WeixinBridge:
                     raise ConnectionLost('发送前聊天窗口正在切换')
                 if window.class_name() != 'mmui::ChatSingleWindow' or title != contact['lookup']:
                     raise BridgeError('发送目标窗口不匹配，请重新核验联系人')
+                self._check_chat_type(window,contact)
                 self._focus(window, contact)
                 before_count = self._visible_text_count(window, contact, text)
                 cancel = window.child_window(title_re='^(取消多选|取消多選|Cancel selection|Cancel Selection)$', control_type='Button')
@@ -1103,6 +1169,15 @@ class WeixinBridge:
         from .wechat_images import send_image
         import win32gui
         foreground=win32gui.GetForegroundWindow()
+        original_guard=before_send
+        if contact.get('chat_type')=='group':
+            def before_send():
+                self._check_account(contact)
+                window=self.windows.get(contact['id'])
+                if window is None or self._title(window)!=contact['lookup']:
+                    raise BridgeError('图片粘贴前群聊目标已变化，已停止操作')
+                self._check_chat_type(window,contact)
+                if original_guard:original_guard()
         try:return send_image(self,contact,data,before_send=before_send)
         finally:
             window=self.windows.get(contact['id'])

@@ -102,7 +102,7 @@ class CompanionRuntime:
         if profile['forget_before'] and run['contact_id']:
             from .conversation_context import contact_context
             excluded=state.get('turn_message_ids',[]) if len(state.get('turn_message_ids',[]))>1 else []
-            state['context']=contact_context(self.ai,self.ai.store.contact(run['contact_id']),state['snapshot']['agent'],run['trigger_id'],bool(run.get('schedule_id')),profile['forget_before'],excluded)
+            state['context']=contact_context(self.ai,self.ai.store.contact(run['contact_id']),state['snapshot']['agent'],run['trigger_id'],bool(run.get('schedule_id')),profile['forget_before'],excluded,group_sender=state.get('group_sender'))
         elif not run['contact_id']:
             state['context']=self.memory.conversation(scope,c['memory']['recent_messages'])+[{'role':'user','content':run['input']}]
         from .image_context import prepare as prepare_images

@@ -78,11 +78,13 @@ def install_companion_routes(app):
     @app.post('/api/ai/schedules')
     def schedule_create(body:dict):
         app.state.ai.data.get('agents',body.get('agent_id'))
+        if app.state.store.contact(body.get('contact_id')).get('chat_type')=='group':raise ValueError('联系人关怀只适用于私聊')
         with app.state.ai.lock:return app.state.ai.companion.memory.save_schedule(body)
 
     @app.put('/api/ai/schedules/{schedule_id}')
     def schedule_update(schedule_id:str,body:dict):
         app.state.ai.data.get('agents',body.get('agent_id'))
+        if app.state.store.contact(body.get('contact_id')).get('chat_type')=='group':raise ValueError('联系人关怀只适用于私聊')
         with app.state.ai.lock:
             result=app.state.ai.companion.memory.save_schedule(body,schedule_id)
             app.state.ai.data.cancel_contact(body['contact_id'],'主动关怀日程已更改')

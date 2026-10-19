@@ -125,6 +125,11 @@ class WebPolicy:
     def __init__(self,ai):self.ai=ai
 
     def prepare(self,run,state):
+        # Public tasks explicitly choose their skills/tools; a general news
+        # classifier must not replace their source with another news pipeline.
+        if state.get('agent_schedule') or state.get('group_sender'):return True
+        from .skills import explicitly_requested
+        if explicitly_requested(state,run['input']):return True
         from . import news_native
         if news_native.requested(run,state):return news_native.prepare(self.ai,run,state)
         from .news import requested, NewsResearch

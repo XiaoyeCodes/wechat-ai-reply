@@ -11,7 +11,10 @@ class Delta:
 
 
 def identity(item):
-    return item.get('kind','text'), item.get('identity_text', item['text'])
+    text=item.get('identity_text', item['text'])
+    if item.get('sender_verified') and item.get('sender'):
+        text='[group-sender:'+item['sender']+']\0'+text
+    return item.get('kind','text'), text
 
 
 def compatible(old, new):
@@ -34,6 +37,17 @@ def align(previous, current):
     matched={}
     for j,new in enumerate(current):
         old=known.get((new['key'],identity(new))) or known.get((new.get('raw_key'),identity(new)))
+        if old is None:
+            # Identity evidence may become visible after the body. Only the
+            # same exact UI row/content may inherit or enrich that evidence.
+            old=next((x for x in previous
+                if x['key'] in (new['key'],new.get('raw_key'))
+                and x.get('kind','text')==new.get('kind','text')
+                and x.get('identity_text',x['text'])==new.get('identity_text',new['text'])
+                and (not x.get('sender_verified') or not new.get('sender_verified')
+                     or x.get('sender')==new.get('sender'))),None)
+            if old and old.get('direction')!=new.get('direction') and 'unknown' not in (old.get('direction'),new.get('direction')):old=None
+            if old:matched[j]=old
         if old and compatible(old,new):matched[j]=old
     # Longest contiguous ordered block, independent of transient UIA runtime IDs.
     runs=[];row=[0]*(len(current)+1)
@@ -61,6 +75,9 @@ def align(previous, current):
             new['raw_key']=new.get('raw_key',new['key']);new['key']=old['key']
         if new.get('direction')=='unknown' and old.get('direction_verified'):
             new['direction']=old['direction'];new['direction_verified']=True
+        if old.get('sender_verified') and not new.get('sender_verified'):
+            for field in ('sender','sender_verified','mention_me','mention_verified','mention_source'):
+                if field in old:new[field]=old[field]
     return result
 
 
@@ -75,8 +92,15 @@ def compare(previous: list[dict] | None, current: list[dict]) -> Delta:
     def key(item):
         # Avatar visibility can change when rows are clipped. UI identity and
         # content still identify the same message, even if direction is unknown.
-        return item['key'], item.get('identity_text', item['text'])
-    old, new = [key(x) for x in previous], [key(x) for x in current]
+        return item['key'], identity(item)
+    effective=[]
+    for item in previous:
+        visible=next((x for x in current if x['key']==item['key']
+            and x.get('kind','text')==item.get('kind','text')
+            and x.get('identity_text',x['text'])==item.get('identity_text',item['text'])),None)
+        effective.append(dict(item,sender=visible.get('sender'),sender_verified=True)
+            if visible and visible.get('sender_verified') and not item.get('sender_verified') else item)
+    old, new = [key(x) for x in effective], [key(x) for x in current]
     for overlap in range(min(len(old), len(new)), 0, -1):
         for start in range(len(new)-overlap+1):
             if old[-overlap:] == new[start:start+overlap]:

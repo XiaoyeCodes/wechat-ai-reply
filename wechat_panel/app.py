@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .runtime import Runtime
@@ -30,15 +30,26 @@ class StrictModel(BaseModel):
 
 class ContactCreate(StrictModel):
     lookup: str = Field(min_length=1, max_length=128)
-    wechat_id: str = Field(min_length=1, max_length=128)
+    wechat_id: str = Field(default='', max_length=128)
+    chat_type: Literal['direct','group'] = 'direct'
+    group_members: list[str] = Field(default_factory=list,max_length=50)
+    group_mention_only: bool = True
+    group_self_name: str = Field(default='',max_length=128)
 
     @field_validator('lookup', 'wechat_id')
     @classmethod
     def clean(cls, value):
         value = value.strip()
-        if not value:
-            raise ValueError('不能只填写空格')
         return value
+
+    @model_validator(mode='after')
+    def valid_target(self):
+        from .group_chats import members
+        if not self.lookup:raise ValueError('请填写完整联系人或群聊名称')
+        if self.chat_type=='direct' and not self.wechat_id:raise ValueError('请填写联系人微信号')
+        self.group_members=members(self.group_members)
+        self.group_self_name=self.group_self_name.strip()
+        return self
 
 
 class ContactPatch(StrictModel):
@@ -48,6 +59,9 @@ class ContactPatch(StrictModel):
     reply_format: Literal['text','voice'] | None = None
     voice_preset: str | None = Field(default=None,max_length=300)
     voice_model: Literal['speech-2.8-turbo','speech-2.8-hd'] | None = None
+    group_members: list[str] | None = Field(default=None,max_length=50)
+    group_mention_only: bool | None = None
+    group_self_name: str | None = Field(default=None,max_length=128)
 
 
 class MessageCreate(StrictModel):
@@ -70,6 +84,8 @@ class Pause(StrictModel):
 
 class DemoMessage(StrictModel):
     text: str = Field(min_length=1, max_length=1999)
+    sender: str = Field(default='',max_length=128)
+    mention_me: bool = False
 
 
 class DraftReply(StrictModel):
@@ -150,7 +166,12 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
 
     @app.post('/api/contacts', status_code=201)
     async def add_contact(body: ContactCreate):
-        profile = await asyncio.to_thread(app.state.runtime.request, 'inspect', lookup=body.lookup, wechat_id=body.wechat_id)
+        if body.chat_type=='group':
+            profile=await asyncio.to_thread(app.state.runtime.request,'inspect_group',lookup=body.lookup,
+                group_members=body.group_members,group_self_name=body.group_self_name)
+            profile.update(chat_type='group',group_mention_only=body.group_mention_only)
+        else:
+            profile = await asyncio.to_thread(app.state.runtime.request, 'inspect', lookup=body.lookup, wechat_id=body.wechat_id)
         try:
             contact = app.state.store.add_contact(profile)
         except sqlite3.IntegrityError:
@@ -159,17 +180,34 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
         return contact
 
     @app.patch('/api/contacts/{contact_id}')
-    def update_contact(contact_id: str, body: ContactPatch):
+    async def update_contact(contact_id: str, body: ContactPatch):
         changes = body.model_dump(exclude_none=True)
         if not changes:
             raise HTTPException(422, '请选择需要修改的设置')
         if 'listening' in changes:
             changes.update(listener_state='starting' if changes['listening'] else 'idle', error='')
         current=app.state.store.contact(contact_id)
+        from .group_chats import is_group,RULE_FIELDS,VERIFICATION_FIELDS
+        if set(changes)&RULE_FIELDS:
+            if not is_group(current):raise HTTPException(422,'请为群聊设置监听规则')
+            settings=current|changes
+            profile=await asyncio.to_thread(app.state.runtime.request,'inspect_group',lookup=current['lookup'],
+                group_members=settings['group_members'],group_self_name=settings['group_self_name'],account_id=current['account_id'])
+            for name in VERIFICATION_FIELDS:changes[name]=bool(profile.get(name))
+            changes['group_self_name']=profile.get('group_self_name',settings['group_self_name'])
+            changes['group_self_name_source']=profile.get('group_self_name_source','')
+            changes['group_members']=profile.get('group_members',settings['group_members'])
+        if (is_group(current) and changes.get('listening',current['listening'])
+                and changes.get('mode',current['mode']) in ('ai_assist','ai_auto')
+                and changes.get('group_mention_only',current['group_mention_only'])
+                and not changes.get('group_self_name',current['group_self_name'])):
+            raise HTTPException(422,'仅 @ 触发时请先填写本人在该群中的完整显示名')
         agent_id=changes.get('ai_agent_id',current['ai_agent_id'])
         mode=changes.get('mode',current['mode'])
         if agent_id:
             agent=app.state.ai.data.get('agents',agent_id)
+            if is_group(current) and agent['kind']!='workflow':
+                raise HTTPException(409,'群监听当前支持本地流程 Agent，请选择工作流 Agent')
             if (agent['kind']=='hermes' and agent.get('hermes_contact_id')!=contact_id
                     and ('ai_agent_id' in changes or (mode in ('ai_assist','ai_auto') and changes.get('listening',current['listening'])))):
                 raise HTTPException(409,'Hermes 尚未授权此联系人。请在 AI 中心编辑该 Agent，设置“允许下达电脑任务的微信联系人”，保存后再绑定。')
@@ -177,7 +215,7 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
             raise HTTPException(409,'请先为此联系人选择 Agent')
         if mode in ('ai_assist','ai_auto') and changes.get('listening',current['listening']):
             app.state.ai.snapshot(agent_id)
-        if set(changes)&{'mode','listening','ai_agent_id'}:
+        if set(changes)&({'mode','listening','ai_agent_id'}|RULE_FIELDS):
             with app.state.ai.lock:app.state.ai.data.cancel_contact(contact_id,'会话模式、监听或 Agent 已切换')
         contact = app.state.store.update_contact(contact_id, **changes)
         app.state.runtime.configure()
@@ -416,6 +454,10 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
                 contact = app.state.store.contact(event['contact_id'])
             except KeyError:
                 continue
+            from .group_chats import is_group,qualifies
+            if is_group(contact):
+                message=app.state.store.message(event['payload']['message_id'])
+                if not message or not qualifies(contact,message):continue
             result.append(dict(event_id=event['id'], contact_id=contact['id'], account_id=contact['account_id'],
                                wechat_id=contact['wechat_id'], message_id=event['payload']['message_id'],
                                text=event['payload']['text'], received_at=event['created_at']))
@@ -424,8 +466,9 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
     if demo:
         @app.post('/api/demo/{contact_id}/incoming')
         async def inject(contact_id: str, body: DemoMessage):
-            app.state.store.contact(contact_id)
-            return await asyncio.to_thread(app.state.runtime.request, 'inject', contact_id=contact_id, text=body.text)
+            contact=app.state.store.contact(contact_id)
+            extra={'sender':body.sender,'mention_me':body.mention_me} if contact.get('chat_type')=='group' else {}
+            return await asyncio.to_thread(app.state.runtime.request, 'inject', contact_id=contact_id, text=body.text,**extra)
 
     @app.get('/')
     def index():
@@ -433,6 +476,8 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
 
     from .companion_api import install_companion_routes
     install_companion_routes(app)
+    from .agent_schedules import install_agent_schedule_routes
+    install_agent_schedule_routes(app)
     from .voice_api import install_voice_routes
     install_voice_routes(app)
 

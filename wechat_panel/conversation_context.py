@@ -5,7 +5,13 @@ HANDOFF_MESSAGES = 4
 HANDOFF_CHARS = 300
 
 
-def contact_context(ai, contact, agent, trigger_id=None, schedule=False, forget_before=0, exclude_ids=()):
+def contact_context(ai, contact, agent, trigger_id=None, schedule=False, forget_before=0, exclude_ids=(),group_sender=None):
+    from .group_chats import is_group,context
+    if is_group(contact):
+        if not group_sender and trigger_id:
+            source=ai.store.message(trigger_id)
+            group_sender=source.get('sender') if source else None
+        return context(ai,contact,agent,trigger_id,group_sender,forget_before) if group_sender else []
     from .companion import companion_config
     memory = companion_config(agent)['memory']
     limit = memory['recent_messages'] if memory['enabled'] else ai.data.settings()['context_messages']

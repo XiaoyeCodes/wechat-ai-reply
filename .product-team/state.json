@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "phase": "delivered",
+  "brief_version": "G1",
+  "brief_path": ".product-team/groups-brief.md",
+  "approval": {
+    "status": "approved",
+    "scope": "Add group listening, designated member and @ trigger, reply to original group; direct user instruction in this chat"
+  },
+  "roles": {
+    "product-manager": {
+      "agent": "/root/testing",
+      "status": "complete",
+      "report": ".product-team/reports/groups-product.md"
+    },
+    "architect": {
+      "agent": "/root/backend",
+      "status": "complete",
+      "report": ".product-team/groups-architecture.md"
+    },
+    "developer": {
+      "agents": [
+        "/root/backend",
+        "/root/frontend"
+      ],
+      "status": "complete"
+    },
+    "ui-designer": {
+      "agent": "/root/frontend",
+      "status": "complete",
+      "report": ".product-team/reports/groups-experience.md"
+    },
+    "experience-reviewer": {
+      "agent": "/root/frontend",
+      "status": "complete",
+      "report": ".product-team/reports/groups-experience.md"
+    },
+    "tester": {
+      "agent": "/root/testing",
+      "status": "complete",
+      "report": ".product-team/reports/groups-tests.md"
+    }
+  },
+  "evidence": [
+    {
+      "check": "Group Python tests",
+      "result": "79 group cases passed in two batches (74 + 5)"
+    },
+    {
+      "check": "Existing private chat and scheduling regressions",
+      "result": "174 passed, 159.99s"
+    },
+    {
+      "check": "Group UI flow",
+      "result": "2 passed, 14.9s",
+      "command": "npx playwright test tests/group-chats.spec.js"
+    },
+    {
+      "check": "Scheduling UI regression",
+      "result": "2 passed in combined run before test-only selector correction"
+    },
+    {
+      "check": "Final image workflow regression",
+      "result": "2 passed, 77 deselected, 3.17s after pending image guard"
+    },
+    {
+      "check": "Live deployment",
+      "result": "Backed up SQLite, restarted port 8766; worker alive, 3 skills retained, group schema and add-group UI verified; no real group created or message sent"
+    }
+  ],
+  "blockers": [],
+  "next_actions": [],
+  "updated_at": "2026-10-19T16:43:51.968333+08:00",
+  "limitations": [
+    "Real WeChat group UIA adaptation not yet exercised against an actual designated group; current WeChat main window is hidden.",
+    "Group replies require a configured workflow Agent and a running desktop WeChat."
+  ]
+}
