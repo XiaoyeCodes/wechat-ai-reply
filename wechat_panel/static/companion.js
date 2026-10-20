@@ -1,4 +1,4 @@
-import {renderAgentSchedules,updateAgentSchedules} from './agent-schedules.js?v=ownership-1';
+import {renderAgentSchedules,updateAgentSchedules} from './agent-schedules.js?v=group-features-2';
 import {agentVoiceFields,bindAgentVoice} from './agent-voice.js?v=1';
 let ctx,library,activeTab='',ownerId='',memoryRequest=0,selection={agent_id:'',contact_id:''};
 const $=id=>document.getElementById(id),esc=v=>ctx.escape(v??'');

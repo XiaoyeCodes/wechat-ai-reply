@@ -145,7 +145,7 @@ def selected_members(names, complete, requested):
     return complete and all(counts[name] == 1 for name in requested)
 
 
-def observe_group_row(row, contact, direction, text, known_members=None):
+def observe_group_row(row, contact, direction, text, known_members=None, sender_evidence=''):
     """Return per-row evidence, with body kept separate from sender identity.
 
 Supported semantic nodes are explicit sender labels or named avatar controls,
@@ -154,7 +154,7 @@ and explicit mention entities (Hyperlink or a native Mention* control). A
     """
     all_nodes = [n for n in _nodes(row) if _visible(n)]
     nodes = [n for n in all_nodes if not _reference(n)]
-    senders = []
+    senders = [sender_evidence] if sender_evidence else []
     for node in nodes:
         aid = _auto_id(node);cls = _class(node)
         sender_label = aid.rsplit('.', 1)[-1] in {'sender_name', 'sender_name_label', 'message_sender', 'chat_sender_name', 'sender_label'}
@@ -167,7 +167,7 @@ and explicit mention entities (Hyperlink or a native Mention* control). A
     if known_members is not None and list(known_members).count(sender)!=1:sender = ''
     sender_verified = bool(sender and direction in ('incoming', 'outgoing'))
     body=text
-    if sender_verified and body.startswith(sender+'\n'):body=body[len(sender)+1:]
+    if sender_verified and not sender_evidence and body.startswith(sender+'\n'):body=body[len(sender)+1:]
     mentions = []
     for node in nodes:
         aid = _auto_id(node);cls = _class(node)
@@ -192,14 +192,18 @@ and explicit mention entities (Hyperlink or a native Mention* control). A
         any(part in (_auto_id(n)+' '+_class(n)) for part in ('quote','refer')) for n in all_nodes)
     if not mention_verified and sender_verified and verified_own and (independent_body is not None or raw_is_body):
         if independent_body is not None:body=independent_body
+        from .wechat_quotes import split_quote
+        quoted=split_quote(body)
+        mention_body=quoted['text'] if quoted else body
         # Markdown-style quoted lines are also data, not a fresh @ request.
-        visible='\n'.join(line for line in body.splitlines() if not line.lstrip().startswith(('>','＞')))
+        visible='\n'.join(line for line in mention_body.splitlines() if not line.lstrip().startswith(('>','＞')))
         visible=re.sub(r'“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"', '', visible)
         pattern=r'(?<![\w@])@'+re.escape(own)+r'(?=$|[\s\u2005\u2009\u200b，。！？、,:;!?：；])'
         mention_me=bool(re.search(pattern,visible))
         mention_verified=True;mention_source='visible_text'
     identity = json.dumps([sender if sender_verified else '', bool(sender_verified), body], ensure_ascii=False)
     return {'sender':sender, 'sender_verified':sender_verified,
+            'sender_source':'uia_selection' if sender_verified and sender_evidence else 'uia_semantic' if sender_verified else '',
             'mention_me':mention_me, 'mention_verified':mention_verified,
             'mention_source':mention_source,'identity_text':identity,'text':body}
 
@@ -311,7 +315,9 @@ def inspect_group(bridge, lookup, group_members=None, group_self_name='', accoun
             alias=self_alias(panel)
     finally:
         if opened:
+            time.sleep(.35)  # The panel can expose members before its slide animation finishes.
             bridge._click(button,target,'ui.group.info.close')
+            time.sleep(.35)
     if not complete:names,complete=read_member_list(bridge,window,target,total)
     if not complete:raise BridgeError('群成员名单未能完整核验，请保持成员列表可访问后重试')
     if not selected_members(names,complete,requested):
@@ -334,5 +340,7 @@ def inspect_group(bridge, lookup, group_members=None, group_self_name='', accoun
     # None means there is no complete roster to constrain structural sender
     # observations. Never treat a partial grid as the whole member population.
     bridge.group_rosters[(actual,target['wechat_id'])]=names if complete else None
+    if getattr(bridge, 'search_avatar', None) and bridge.search_avatar[0] == lookup:
+        bridge.avatar_cache[(actual,target['wechat_id'])] = bridge.search_avatar[1]
     bridge._record('ui.group.verified',target,members=len(requested),self_name_source=source)
     return profile

@@ -274,8 +274,12 @@ test('工作台：核验联系人、监听消息、手动发送、暂停和预�
   await expect(page.getByLabel('消息内容')).toHaveValue('这条新草稿需要保留');
   await page.unroute(`**/api/contacts/${cid}/messages`);
   await page.getByLabel('消息内容').fill('');
-  await page.getByRole('button',{name:'Agent 接口',exact:true}).click();
-  await expect(page.locator('.endpoint')).toContainText('/api/agent/events');
+  await expect(page.getByRole('button',{name:'Agent 接口',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'事件接口说明',exact:true})).toHaveCount(0);
+  await expect(page.locator('#view-agent')).toHaveCount(0);
+  await expect(page.locator('#ai-mode-hint')).toBeHidden();
+  await expect(page.locator('#contact-agent-hint')).toBeHidden();
+  await expect(page.getByRole('button',{name:'管理 Agent',exact:true})).toBeVisible();
   await page.getByRole('button',{name:'联系人管理',exact:true}).click();
   await page.getByRole('button',{name:'移除 陈屿',exact:true}).click();
   await page.getByRole('button',{name:'移除联系人',exact:true}).click();

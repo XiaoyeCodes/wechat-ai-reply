@@ -69,6 +69,11 @@ class Store:
                     PRIMARY KEY(account_id, wechat_id)
                 );
                 INSERT OR IGNORE INTO settings VALUES ('paused', 'false');
+                CREATE TABLE IF NOT EXISTS group_member_avatars (
+                    contact_id TEXT NOT NULL REFERENCES contacts(id) ON DELETE CASCADE,
+                    sender TEXT NOT NULL, digest TEXT NOT NULL, data BLOB NOT NULL,
+                    PRIMARY KEY(contact_id, sender)
+                );
             ''')
             for table, fields in {
                 'contacts':{'ai_agent_id':"TEXT NOT NULL DEFAULT ''",'ai_revision':'INTEGER NOT NULL DEFAULT 0','ai_start_message':'INTEGER NOT NULL DEFAULT 0',
@@ -85,7 +90,8 @@ class Store:
                             'sender':"TEXT NOT NULL DEFAULT ''",'sender_verified':'INTEGER NOT NULL DEFAULT 0',
                             'mention_me':'INTEGER NOT NULL DEFAULT 0','mention_verified':'INTEGER NOT NULL DEFAULT 0',
                             'mention_source':"TEXT NOT NULL DEFAULT ''",
-                            'direction_verified':'INTEGER NOT NULL DEFAULT 0','media_id':"TEXT NOT NULL DEFAULT ''",'text_pending':'INTEGER NOT NULL DEFAULT 0'}
+                            'direction_verified':'INTEGER NOT NULL DEFAULT 0','media_id':"TEXT NOT NULL DEFAULT ''",'text_pending':'INTEGER NOT NULL DEFAULT 0',
+                            'quote':"TEXT NOT NULL DEFAULT '{}'"}
             }.items():
                 columns={r['name'] for r in db.execute('PRAGMA table_info('+table+')')}
                 for name,definition in fields.items():
@@ -175,6 +181,27 @@ class Store:
                 raise KeyError('头像尚未同步')
             return row['data']
 
+    def set_member_avatar(self, contact_id, sender, data):
+        if not isinstance(data, bytes) or len(data) > 65536 or not sender:
+            raise ValueError('无效群成员头像')
+        with Image.open(BytesIO(data)) as image:
+            if image.format != 'PNG' or image.size != (64, 64):raise ValueError('无效群成员头像')
+            image.verify()
+        digest = hashlib.sha256(data).hexdigest()[:24]
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM contacts WHERE id=? AND chat_type='group'", (contact_id,)).fetchone():return
+            old = db.execute('SELECT digest FROM group_member_avatars WHERE contact_id=? AND sender=?', (contact_id, sender)).fetchone()
+            if old and old[0] == digest:return
+            db.execute('INSERT OR REPLACE INTO group_member_avatars VALUES(?,?,?,?)', (contact_id, sender, digest, data))
+            self.event(db, 'contact.member_avatar', contact_id)
+
+    def member_avatar(self, contact_id, sender):
+        self.contact(contact_id)
+        with self.connect() as db:
+            row = db.execute('SELECT data FROM group_member_avatars WHERE contact_id=? AND sender=?', (contact_id, sender)).fetchone()
+            if not row:raise KeyError('群成员头像暂不可用')
+            return row['data']
+
     def add_contact(self, profile):
         from .group_chats import is_group, members, VERIFICATION_FIELDS
         contact_id = str(uuid.uuid4())
@@ -249,12 +276,20 @@ class Store:
     def messages(self, contact_id, before=None, limit=100):
         self.contact(contact_id)
         with self.connect() as db:
-            rows = db.execute('''SELECT * FROM messages WHERE contact_id=? AND id<?
+            rows = db.execute('''SELECT messages.*,
+                (SELECT digest FROM group_member_avatars WHERE contact_id=messages.contact_id AND sender=messages.sender) sender_avatar_version
+                FROM messages WHERE contact_id=? AND id<?
                 ORDER BY id DESC LIMIT ?''', (contact_id, before or 2**63-1, limit)).fetchall()
             return [self._message_values(dict(x)) for x in reversed(rows)]
 
     @staticmethod
     def _message_values(message):
+        if 'quote' in message:message['quote']=json.loads(message['quote'] or '{}')
+        from urllib.parse import urlencode
+        version = message.pop('sender_avatar_version', None)
+        message['sender_avatar_url'] = (f"/api/contacts/{message['contact_id']}/member-avatar?" +
+            urlencode({'sender': message.get('sender', ''), 'v': version})
+            if version and message.get('sender_verified') else None)
         for field in ('sender_verified','mention_me','mention_verified'):
             if field in message:message[field]=bool(message[field])
         return message
@@ -448,7 +483,7 @@ class Store:
         from .group_chats import qualifies
         contact=db.execute('SELECT * FROM contacts WHERE id=?',(contact_id,)).fetchone()
         message=db.execute('SELECT * FROM messages WHERE id=?',(message_id,)).fetchone()
-        if contact and message and qualifies(dict(contact),dict(message)):
+        if contact and message and not message['text_pending'] and qualifies(dict(contact),dict(message)):
             self.event(db,'agent.message',contact_id,message_id=message_id,text=text,account_id=account_id)
 
     def ingest(self, contact_id, items):
@@ -466,6 +501,7 @@ class Store:
                     item['key']+=':member:'+hashlib.sha256(item['sender'].encode()).hexdigest()[:16]
             items=align(previous,items)
             delta=compare(previous,items)
+            if delta.gap and any(item.get('native_fresh') for item in items):delta.gap=False
             if delta.gap:
                 db.execute('INSERT INTO snapshot_pending VALUES(?,1) ON CONFLICT(contact_id) DO UPDATE SET attempts=attempts+1',(contact_id,))
                 attempts=db.execute('SELECT attempts FROM snapshot_pending WHERE contact_id=?',(contact_id,)).fetchone()[0]
@@ -478,6 +514,9 @@ class Store:
                     self.event(db,'listener.recovered',contact_id,detail='已自动对齐消息并恢复监听；历史中断记录保留在日志中')
         media={}
         for item in items:
+            if item.get('sender_verified') and item.get('sender_avatar_data'):
+                import base64
+                self.set_member_avatar(contact_id, item['sender'], base64.b64decode(item['sender_avatar_data'], validate=True))
             if item.get('image_data'):
                 with self.connect() as lookup:
                     row=lookup.execute('SELECT media_id FROM messages WHERE contact_id=? AND source_key=?',(contact_id,item['key'])).fetchone()
@@ -492,15 +531,16 @@ class Store:
             # previous/delta were checked before media handling; the serial pump
             # is the only snapshot writer.
             for item in delta.items:
+                historical=delta.historical and not item.get('native_fresh',False)
                 cursor = db.execute('''INSERT OR IGNORE INTO messages
                     (contact_id,direction,text,kind,status,created_at,source_key,historical,direction_verified,media_id,text_pending,error,
-                     sender,sender_verified,mention_me,mention_verified,mention_source)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (contact_id, item['direction'], item['text'],
-                    item.get('kind','text'), 'observed', now(), item['key'], delta.historical,bool(item.get('direction_verified')),media.get(item['key'],''),bool(item.get('text_pending')),item.get('text_error',''),
-                    item.get('sender',''),bool(item.get('sender_verified')),bool(item.get('mention_me')),bool(item.get('mention_verified')),item.get('mention_source','')))
+                     sender,sender_verified,mention_me,mention_verified,mention_source,quote)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''', (contact_id, item['direction'], item['text'],
+                    item.get('kind','text'), 'observed', now(), item['key'], historical,bool(item.get('direction_verified')),media.get(item['key'],''),bool(item.get('text_pending')),item.get('text_error',''),
+                    item.get('sender',''),bool(item.get('sender_verified')),bool(item.get('mention_me')),bool(item.get('mention_verified')),item.get('mention_source',''),json.dumps(item.get('quote',{}),ensure_ascii=False)))
                 if cursor.rowcount:
                     self.event(db, 'message.updated', contact_id, message_id=cursor.lastrowid)
-                    if not delta.historical and item['direction'] == 'incoming':
+                    if not historical and item['direction'] == 'incoming':
                         db.execute('UPDATE contacts SET unread=unread+1 WHERE id=?', (contact_id,))
                         if (item.get('kind') == 'text' and not item.get('text_pending')) or (item.get('kind')=='image' and media.get(item['key'])):
                             self._agent_message(db,contact_id,cursor.lastrowid,item['text'],item.get('account_id'))
@@ -516,6 +556,9 @@ class Store:
                 row=db.execute('SELECT * FROM messages WHERE contact_id=? AND source_key=?',
                                (contact_id,item['key'])).fetchone()
                 if not row:continue
+                if item.get('quote') and (json.loads(row['quote'] or '{}')!=item['quote'] or row['text']!=item['text']):
+                    db.execute('UPDATE messages SET quote=?,text=? WHERE id=?',(json.dumps(item['quote'],ensure_ascii=False),item['text'],row['id']))
+                    self.event(db,'message.updated',contact_id,message_id=row['id'])
                 if item.get('sender_verified') and (not row['sender_verified'] or row['sender']==item.get('sender')):
                     metadata=(item.get('sender',''),True,bool(item.get('mention_me')),bool(item.get('mention_verified')),item.get('mention_source',''))
                     if metadata != tuple(row[k] for k in ('sender','sender_verified','mention_me','mention_verified','mention_source')):
@@ -561,7 +604,7 @@ class Store:
             # turn old messages into new Agent events when it reappears.
             if (items or not prior) and not delta.retain:
                 db.execute('INSERT OR REPLACE INTO snapshots VALUES(?,?)',
-                           (contact_id, json.dumps([{k:v for k,v in item.items() if k!='image_data'} for item in items], ensure_ascii=False)))
+                           (contact_id, json.dumps([{k:v for k,v in item.items() if k not in ('image_data','sender_avatar_data')} for item in items], ensure_ascii=False)))
             if delta.gap:
                 detail = '窗口历史发生变化；已重新建立监听基线，中断区间是否完整需要核对'
                 error = db.execute('SELECT error FROM contacts WHERE id=?', (contact_id,)).fetchone()[0]

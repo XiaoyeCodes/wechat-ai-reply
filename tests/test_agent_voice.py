@@ -70,8 +70,8 @@ def test_explicit_wechat_switch_overrides_following_agent(setup):
     assert preferences(store,store.contact(contact['id']))['reply_format']=='text'
 
 
-def test_invalid_agent_voice_is_rejected_and_group_stays_text(setup):
+def test_invalid_agent_voice_is_rejected_and_group_can_follow_agent(setup):
     store,ai,_,agent,contact=setup
     with pytest.raises(ValueError):profile(ai,agent,preset='unknown-voice')
     profile(ai,agent,reply_format='voice',preset='xiaoyi')
-    assert preferences(store,contact|{'chat_type':'group','reply_format':'agent'})['reply_format']=='text'
+    assert preferences(store,store.contact(contact['id'])|{'chat_type':'group','reply_format':'agent'})['reply_format']=='voice'

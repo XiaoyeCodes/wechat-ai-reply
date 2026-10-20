@@ -6,12 +6,13 @@ HANDOFF_CHARS = 300
 
 
 def contact_context(ai, contact, agent, trigger_id=None, schedule=False, forget_before=0, exclude_ids=(),group_sender=None):
+    from .quoted_context import history_text
     from .group_chats import is_group,context
     if is_group(contact):
         if not group_sender and trigger_id:
             source=ai.store.message(trigger_id)
             group_sender=source.get('sender') if source else None
-        return context(ai,contact,agent,trigger_id,group_sender,forget_before) if group_sender else []
+        return context(ai,contact,agent,trigger_id,group_sender,forget_before,exclude_ids) if group_sender else []
     from .companion import companion_config
     memory = companion_config(agent)['memory']
     limit = memory['recent_messages'] if memory['enabled'] else ai.data.settings()['context_messages']
@@ -66,6 +67,6 @@ def contact_context(ai, contact, agent, trigger_id=None, schedule=False, forget_
             '不要将这段背景自动写入当前 Agent 的长期记忆。\n' + json.dumps(entries, ensure_ascii=False)})
     context.extend({'role': 'assistant' if m['direction'] == 'outgoing' else 'user',
                     'content': ('[已通过微信原生语音发送] '+m['text']) if m['kind']=='voice' else
-                               m['text'] if m['kind']=='text' else '['+('用户' if m['direction']=='incoming' else '已发送')+'图片，消息编号 '+str(m['id'])+']'}
+                               history_text(m) if m['kind']=='text' else '['+('用户' if m['direction']=='incoming' else '已发送')+'图片，消息编号 '+str(m['id'])+']'}
                    for m in own[-limit:])
     return context

@@ -25,8 +25,8 @@ def stamp(value):
 
 
 def unanswered(ai,contact,trigger,forget_before=0):
-    from .group_chats import is_group
-    if is_group(contact):return [trigger]
+    from .group_chats import is_group, qualifies
+    group=is_group(contact)
     boundary=max(contact.get('ai_start_message',0),contact.get('ai_context_start_message',0),forget_before)
     with ai.store.connect() as db:
         # A manual answer or attempted AI delivery closes the preceding turn.
@@ -37,15 +37,29 @@ def unanswered(ai,contact,trigger,forget_before=0):
             "AND trigger_id>? AND trigger_id<? ORDER BY trigger_id DESC LIMIT 20",
             (contact['id'],contact['ai_agent_id'],boundary,trigger['id'])).fetchall()
     boundary=max(boundary,answered)
+    if group:
+        # Replies to another member do not close this member's pending turn.
+        boundary=max(contact.get('ai_start_message',0),contact.get('ai_context_start_message',0),forget_before)
+        for message in ai.store.messages(contact['id'],before=trigger['id'],limit=200):
+            if message['direction']!='outgoing' or message['historical'] or message['status'] not in ('observed','confirmed','sending','uncertain'):continue
+            if message.get('origin') in ('approval','ai_progress'):continue
+            if message.get('origin')=='ai' and message.get('ai_run_id'):
+                previous=ai.data.run(message['ai_run_id'])
+                if previous['state'].get('group_sender')!=trigger['sender']:continue
+            boundary=max(boundary,message['id'])
     # Never turn a follow-up into a replay of an external write already started.
     for row in runs:
         if row['trigger_id']<=boundary:continue
         old=ai.data.decode_state(row['state'])
+        if group and old.get('group_sender')!=trigger['sender']:continue
         if old.get('effect_started'):boundary=max(boundary,row['trigger_id'])
     cutoff=stamp(trigger['created_at'])-timedelta(seconds=MERGE_SECONDS)
-    return [m for m in ai.store.messages(contact['id'],before=trigger['id']+1,limit=200)
+    return [m for m in ai.store.messages(contact['id'],before=None if group else trigger['id']+1,limit=200)
             if m['id']>boundary and not m['historical'] and m['direction']=='incoming'
-            and m['kind'] in ('text','image') and not m.get('text_pending') and stamp(m['created_at'])>=cutoff]
+            and m['kind'] in ('text','image') and not m.get('text_pending') and stamp(m['created_at'])>=cutoff
+            and (not group or m.get('sender_verified') and m['sender']==trigger['sender']
+                 and (m['id']<=trigger['id'] or m['kind']=='image' and stamp(m['created_at'])<=stamp(trigger['created_at'])+timedelta(seconds=IMAGE_WAIT_SECONDS))
+                 and (m['kind']=='image' or qualifies(contact,m)))]
 
 
 def prepare(ai,contact,trigger,state,forget_before=0):
@@ -54,19 +68,32 @@ def prepare(ai,contact,trigger,state,forget_before=0):
     if not rows:rows=[trigger]
     state['turn_message_ids']=[m['id'] for m in rows]
     state['turn_messages']=[{'id':m['id'],'kind':m['kind'],'text':m['text']} for m in rows]
+    from .quoted_context import prepare as prepare_quotes, image_ref
+    quoted_images=prepare_quotes(contact,rows,state)
     media=agent.get('companion',{}).get('media',{})
     boundary=max(contact.get('ai_context_start_message',0),forget_before)
     current=[m for m in rows if m['kind']=='image']
     recent=[]
     if media.get('understand_images') or media.get('image_service_id'):
-        recent=[m for m in ai.store.messages(contact['id'],before=trigger['id']+1,limit=40)
+        from .group_chats import is_group
+        recent=[m for m in ai.store.messages(contact['id'],before=trigger['id']+1,limit=200 if is_group(contact) else 40)
                 if m['id']>boundary and m['kind']=='image' and m['direction']=='incoming'
-                and m['id'] not in state['turn_message_ids']][-4:]
-        from .group_chats import is_group, qualifies
-        if is_group(contact):recent=[m for m in recent if qualifies(contact,m) and m['sender']==trigger['sender']]
+                and m['id'] not in state['turn_message_ids']]
+        if is_group(contact):recent=[m for m in recent if not m.get('historical') and m.get('sender_verified') and m['sender']==trigger['sender']]
+        recent=recent[-4:]
     chosen=(current+recent)[:8]
     state['input_images']=[{'message_id':m['id'],'media_id':m.get('media_id',''),
                             'media_scope':'wechat:'+contact['id'],'current':m in current} for m in chosen]
+    if state['quoted_messages']:
+        state['input_images']=quoted_images
+    elif media.get('understand_images') or media.get('image_service_id'):
+        from .group_chats import is_group
+        quoted_recent=[m for m in ai.store.messages(contact['id'],before=trigger['id'],limit=200)
+            if m['id']>boundary and not m.get('historical') and m['direction']=='incoming'
+            and m.get('quote',{}).get('kind')=='image'
+            and (not is_group(contact) or m.get('sender_verified') and m['sender']==trigger['sender'])][-4:]
+        state['input_images']+= [image_ref(contact,m,False) for m in quoted_recent]
+    state['input_images']=state['input_images'][:8]
     state['omitted_images']=max(0,len(current)-len(chosen))
     if len(rows)==1:return trigger['text']
     parts=[{'顺序':i+1,'类型':m['kind'],'内容':m['text'] if m['kind']=='text' else '[图片]'} for i,m in enumerate(rows)]

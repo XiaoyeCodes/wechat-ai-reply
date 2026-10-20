@@ -22,6 +22,16 @@ def compatible(old, new):
             or 'unknown' in (old.get('direction'),new.get('direction'))))
 
 
+def sender_enrichment(old, new):
+    """A later native read can enrich the same visibly unchanged message."""
+    return (not old.get('sender_verified') and new.get('sender_verified')
+            and new.get('sender_source') == 'uia_selection'
+            and old.get('native_key') and old['native_key'] == new.get('native_key')
+            and old.get('sender_header') and old['sender_header'] == new.get('sender_header')
+            and old['text'] == new['text'] and old.get('kind','text') == new.get('kind','text')
+            and (old.get('direction') == new.get('direction') or 'unknown' in (old.get('direction'),new.get('direction'))))
+
+
 def align(previous, current):
     """Keep durable identities across Qt recycling, using ordered unique context.
 
@@ -36,6 +46,10 @@ def align(previous, current):
         for key in (old['key'],old.get('raw_key',old['key'])):known[(key,identity(old))]=old
     matched={}
     for j,new in enumerate(current):
+        enriched=next((old for old in previous if sender_enrichment(old,new)),None)
+        if enriched:
+            matched[j]=enriched
+            continue
         old=known.get((new['key'],identity(new))) or known.get((new.get('raw_key'),identity(new)))
         if old is None:
             # Identity evidence may become visible after the body. Only the
@@ -95,6 +109,11 @@ def compare(previous: list[dict] | None, current: list[dict]) -> Delta:
         return item['key'], identity(item)
     effective=[]
     for item in previous:
+        enriched=next((x for x in current if x['key']==item['key'] and sender_enrichment(item,x)),None)
+        if enriched:
+            effective.append(dict(item,sender=enriched['sender'],sender_verified=True,
+                                  identity_text=enriched.get('identity_text',enriched['text'])))
+            continue
         visible=next((x for x in current if x['key']==item['key']
             and x.get('kind','text')==item.get('kind','text')
             and x.get('identity_text',x['text'])==item.get('identity_text',item['text'])),None)

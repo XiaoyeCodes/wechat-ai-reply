@@ -1,6 +1,6 @@
 import {initAI, refreshAI, scheduleAIRefresh, renderContactAI,activateAIView} from './ai.js?v=api-settings-1';
 import {initVoice,renderVoice} from './voice.js?v=voice-settings-3';
-import {initGroups,isGroup,groupSummary,contactKindChanged,newContactBody,renderGroupDetails,groupMessageSender,demoIncomingBody} from './groups.js?v=1';
+import {initGroups,isGroup,groupSummary,contactKindChanged,newContactBody,renderGroupDetails,groupMessageSender,demoIncomingBody} from './groups.js?v=2';
 
 const paths = {
   chat:'M4 4h16v12H10l-6 4V4Z M8 8h8 M8 12h5',
@@ -62,15 +62,14 @@ async function api(path, {method='GET', body, ...options}={}) {
 }
 function setView(view) {
   state.view=view;
-  for (const key of ['chat','contacts','status','agent','ai','settings']) $('view-'+key).hidden=key!==view;
+  for (const key of ['chat','contacts','status','ai','settings']) $('view-'+key).hidden=key!==view;
   document.querySelectorAll('.nav-item').forEach(b=>{b.classList.toggle('active',b.dataset.view===view);b.setAttribute('aria-current',b.dataset.view===view?'page':'false');});
-  $('page-title').textContent={chat:'聊天工作台',contacts:'联系人管理',status:'运行状态',agent:'Agent 接口',ai:'AI 中心',settings:'设置'}[view];
+  $('page-title').textContent={chat:'聊天工作台',contacts:'联系人管理',status:'运行状态',ai:'AI 中心',settings:'设置'}[view];
   if(view==='status') renderStatus();
   if(view==='ai'||view==='settings'){activateAIView(view);refreshAI().catch(error=>toast(error.message,true));}
 }
 document.querySelectorAll('.nav-item[data-view]').forEach(b=>b.addEventListener('click',()=>setView(b.dataset.view)));
 $('connection-button').onclick=$('banner-status').onclick=()=>setView('status');
-$('agent-details').onclick=()=>setView('agent');
 $('show-details').onclick=()=>$('detail-panel').classList.toggle('open');
 $('chat-avatar').onclick=()=>{if(matchMedia('(max-width:760px)').matches){state.mobileList=true;$('view-chat').classList.add('mobile-list');}};
 $('chat-avatar').title='窄屏点击返回会话列表';
@@ -150,7 +149,7 @@ function renderDetails() {
 }
 function renderMessages(force=false) {
   if(!current())return;
-  const fingerprint=JSON.stringify([current().avatar_url,current().self_avatar_url,current().chat_type,state.messages.map(m=>[m.id,m.direction,m.kind,m.text,m.historical,m.status,m.error,m.origin,m.media_id,m.sender,m.sender_verified,m.mention_me,m.mention_verified])]);
+  const fingerprint=JSON.stringify([current().avatar_url,current().self_avatar_url,current().chat_type,state.messages.map(m=>[m.id,m.direction,m.kind,m.text,m.historical,m.status,m.error,m.origin,m.media_id,m.sender,m.sender_verified,m.mention_me,m.mention_verified,m.sender_avatar_url,m.quote])]);
   if(fingerprint===state.fingerprint&&!force)return;
   state.fingerprint=fingerprint;
   const box=$('messages'), nearBottom=box.scrollHeight-box.scrollTop-box.clientHeight<90, oldTop=box.scrollTop;
@@ -163,7 +162,9 @@ function renderMessages(force=false) {
     const sender=groupMessageSender(m,current());
     const labels=[dateText(m.created_at),m.origin==='ai'?'AI 回复':m.origin==='approval'?'操作确认':'',m.kind==='voice'?'语音消息':'',m.historical?'历史同步':'',m.direction==='unknown'?'方向待识别':'',messageLabels[m.status]||''].filter(Boolean);
     const body=m.kind==='image'&&m.media_id?`<a href="/api/ai/media/${encodeURIComponent(m.media_id)}" target="_blank" rel="noopener"><img class="message-photo" src="/api/ai/media/${encodeURIComponent(m.media_id)}" alt="收到的图片" loading="lazy"></a>`:escape(m.text);
-    return divider+`<div class="message-row ${escape(m.direction)}" data-message-id="${m.id}">${avatar(outgoing?'我':sender|| (m.direction==='incoming'?current().lookup:'?'),outgoing?current().self_avatar_url:isGroup(current())?null:m.direction==='incoming'?current().avatar_url:null)}<div class="message-column">${sender?`<div class="group-message-sender">${escape(sender)}${m.mention_me&&m.mention_verified?'<span class="group-tag">@我</span>':''}</div>`:''}<div class="message-bubble">${body}</div><div class="message-meta ${['uncertain','failed'].includes(m.status)?'error':''}">${labels.map(escape).join(' · ')}</div>${m.error?`<p class="message-error">${escape(m.error)}</p>`:''}</div></div>`;
+    const q=m.quote;
+    const quote=q?.kind?`<blockquote class="message-quote"><strong>引用 ${escape(q.sender||'消息')}</strong>${q.kind==='image'?(q.media_id?`<a href="/api/ai/media/${encodeURIComponent(q.media_id)}" target="_blank" rel="noopener"><img src="/api/ai/media/${encodeURIComponent(q.media_id)}" alt="被引用的图片" loading="lazy"></a>`:`<span>${q.status==='pending'?'引用图片读取中':'引用图片暂未读取'}</span>`):`<p>${escape(q.text||'')}</p>`}${q.truncated?'<small>引用内容过长，已截短</small>':''}</blockquote>`:'';
+    return divider+`<div class="message-row ${escape(m.direction)}" data-message-id="${m.id}">${avatar(outgoing?'我':sender|| (m.direction==='incoming'?current().lookup:'?'),outgoing?current().self_avatar_url:isGroup(current())?m.sender_avatar_url:m.direction==='incoming'?current().avatar_url:null)}<div class="message-column">${sender?`<div class="group-message-sender">${escape(sender)}${m.mention_me&&m.mention_verified?'<span class="group-tag">@我</span>':''}</div>`:''}<div class="message-bubble">${quote}${body}</div><div class="message-meta ${['uncertain','failed'].includes(m.status)?'error':''}">${labels.map(escape).join(' · ')}</div>${m.error?`<p class="message-error">${escape(m.error)}</p>`:''}</div></div>`;
   }).join(''):'<div class="list-empty">这里还没有消息<br>开启监听后会同步当前窗口可见消息</div>');
   if(force||nearBottom)box.scrollTop=box.scrollHeight;else box.scrollTop=oldTop;
   if($('load-older'))$('load-older').onclick=loadOlder;

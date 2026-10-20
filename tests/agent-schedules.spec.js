@@ -93,14 +93,14 @@ test('Agent 定时任务：本地假模型执行一次，向两位演示联系�
   expect(response.ok(),await response.text()).toBeTruthy();sid=(await response.json()).id;
   await openSchedules(page,agent);
   const card=page.locator('.agent-schedule-card').filter({hasText:'共同结果推送'});
-  await expect(card).toContainText('2 位符合条件的联系人');
+  await expect(card).toContainText('2 个符合条件的接收会话');
   await expect(card.getByRole('button',{name:'立即运行',exact:true})).toBeEnabled();
   await card.getByRole('button',{name:'立即运行',exact:true}).click();
   await expect(page.locator('#agent-schedule-history')).toBeVisible();
   await expect.poll(async()=>{
    const history=await (await request.get('/api/ai/agent-schedules/'+sid+'/runs')).json();return history[0]?.status;
   },{timeout:20000}).toBe('completed');
-  await expect(page.locator('#schedule-history-content')).toContainText('联系人投递 · 2 人',{timeout:10000});
+  await expect(page.locator('#schedule-history-content')).toContainText('会话投递 · 2 个',{timeout:10000});
   await expect(page.locator('#schedule-history-content').getByText('微信已核对',{exact:true})).toHaveCount(2);
   expect(calls).toBe(1);
   for(const contact of contacts){

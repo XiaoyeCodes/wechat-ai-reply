@@ -19,6 +19,11 @@ def prepare(runtime,run,state,config,context):
     model_key=hashlib.sha256(json.dumps({k:provider.get(k) for k in ('id','model','base_url')},sort_keys=True).encode()).hexdigest()+':v2' if provider else ''
     observations=[]
     for ref in refs:
+        if ref.get('quote_message_id'):
+            source=ai.store.message(ref['quote_message_id'])
+            if not source or source['contact_id']!=run['contact_id'] or source.get('quote',{}).get('kind')!='image':
+                raise ValueError('引用图片不属于当前会话')
+            ref={**ref,'media_id':source['quote'].get('media_id','')}
         if ref.get('message_id'):
             source=ai.store.message(ref['message_id'])
             if not source or source['contact_id']!=run['contact_id']:raise ValueError('图片不属于当前联系人')
@@ -28,11 +33,12 @@ def prepare(runtime,run,state,config,context):
         if ref['media_scope'] not in permitted:raise ValueError('图片不属于当前会话')
         if ref.get('media_id'):memory.read_media(ref['media_id'],ref['media_scope'])
         observation={'message_id':ref.get('message_id'),'media_id':ref.get('media_id'),'current':ref['current']}
+        if ref.get('quoted'):observation.update(quoted=True,quote_message_id=ref['quote_message_id'])
         if not enabled:
             observation.update(status='disabled',description='已收到图片，可用 generate_image 的 edit 模式修改原图；未做内容识别。'
                 if can_edit and ref.get('media_id') else '已收到图片，但当前 Agent 未开启图片理解。')
         elif not ref['media_id']:
-            observation.update(status='pending',description='已收到图片消息，但原图暂未读取成功，不能声称用户没有发图。')
+            observation.update(status='pending',description='已收到引用图片，但引用原图尚未读取，不能拿近期其他图片替代。' if ref.get('quoted') else '已收到图片消息，但原图暂未读取成功，不能声称用户没有发图。')
         else:
             permitted={scope}
             if run['contact_id']:permitted.add('wechat:'+run['contact_id'])
@@ -50,8 +56,9 @@ def prepare(runtime,run,state,config,context):
                     if not description:raise ValueError('图片模型未返回观察内容')
                     memory.save_image_observation(scope,media['id'],model_key,description,state['memory_revision'])
                 observation.update(status='ready',description=description)
-                ai.data.trace(run['id'],'图片理解缓存' if cached else '图片理解',
-                              {'model':provider['model'],'media_id':media['id'],'message_id':ref.get('message_id')})
+                step=('引用图片理解缓存' if cached else '引用图片理解') if ref.get('quoted') else ('图片理解缓存' if cached else '图片理解')
+                ai.data.trace(run['id'],step,{'model':provider['model'],'media_id':media['id'],
+                    'message_id':ref.get('message_id'),'quote_message_id':ref.get('quote_message_id')})
                 # A caption is not a substitute for the original image when a
                 # later question asks about visual details it may have omitted.
                 if (not ref['current'] and ai._guard(run['id']) and

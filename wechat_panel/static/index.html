@@ -6,12 +6,12 @@
   <meta name="theme-color" content="#184e3f">
   <title>微信工作台 · Relay</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23184e3f'/%3E%3Cpath d='M11 12h18v13H19l-7 5V12' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/app.css?v=quotes-1">
   <link rel="stylesheet" href="/assets/voice-settings.css?v=1">
   <link rel="stylesheet" href="/assets/ai.css?v=workspace-1">
   <link rel="stylesheet" href="/assets/api-settings.css?v=1">
   <link rel="stylesheet" href="/assets/agent-categories.css?v=skill-check-1">
-  <script src="/assets/app.js?v=api-settings-1" type="module"></script>
+  <script src="/assets/app.js?v=sidebar-clean-1" type="module"></script>
 <link rel="stylesheet" href="/assets/companion.css">
   <link rel="stylesheet" href="/assets/agent-schedules.css?v=1">
   <link rel="stylesheet" href="/assets/groups.css?v=1">
@@ -25,7 +25,6 @@
         <button class="nav-item active" data-view="chat" aria-label="聊天工作台"><span data-icon="chat"></span><span>工作台</span></button>
         <button class="nav-item" data-view="contacts" aria-label="联系人管理"><span data-icon="users"></span><span>联系人</span></button>
         <button class="nav-item" data-view="ai" aria-label="AI 中心"><span data-icon="spark"></span><span>AI 中心</span></button>
-        <button class="nav-item" data-view="agent" aria-label="Agent 接口"><span data-icon="panel"></span><span>接口</span></button>
       </nav>
       <div class="rail-bottom">
         <button class="nav-item" id="ai-global-settings" data-view="settings" aria-label="设置"><span data-icon="panel"></span><span>设置</span></button>
@@ -88,7 +87,7 @@
             <div class="setting-row"><div><h3>消息监听</h3><p id="listener-detail">尚未开启</p></div><button class="switch" id="listen-toggle" role="switch" aria-checked="false" aria-label="切换消息监听"><span></span></button></div>
             <p class="inline-error" id="listener-error" hidden></p>
             <label class="field-label" for="conversation-mode">会话模式</label><select id="conversation-mode"><option value="manual">人工聊天</option><option value="listen_only">仅监听</option><option value="ai_assist">AI 辅助回复</option><option value="ai_auto">AI 自动回复</option></select>
-            <p class="field-hint" id="ai-mode-hint">人工聊天可在工作台回复；仅监听保留消息，不发送回复。</p>
+            <p class="field-hint" id="ai-mode-hint" hidden>人工聊天可在工作台回复；仅监听保留消息，不发送回复。</p>
             <label class="field-label" for="reply-format">Agent 回复形式</label><select id="reply-format"><option value="agent">跟随 Agent</option><option value="text">文字回复</option><option value="voice">语音回复</option></select>
             <p class="field-hint" id="reply-format-hint">仅对当前联系人生效。也可以在微信说“以后用语音回复”或“改回文字回复”。</p>
             <section id="voice-studio" class="voice-studio" aria-label="声音与试听" hidden>
@@ -103,7 +102,7 @@
               <p id="voice-preview-status" class="field-hint" role="status" aria-live="polite">试听只在浏览器播放，不会发送到微信。</p>
               <p id="voice-network-note" class="voice-network-note"></p>
             </section>
-            <div class="agent-placeholder"><span data-icon="spark"></span><h3>此联系人的 Agent</h3><label class="sr-only" for="contact-agent">选择联系人 Agent</label><select id="contact-agent" disabled><option value="" disabled hidden>请选择 Agent</option></select><p id="contact-agent-hint">在 AI 中心配置电商、财务或你开发好的 Agent，再为每位联系人独立选择。</p><button class="text-button" id="ai-manage">管理 Agent<span data-icon="arrow"></span></button><button class="text-button" id="agent-details">事件接口说明</button></div>
+            <div class="agent-placeholder"><span data-icon="spark"></span><h3>此联系人的 Agent</h3><label class="sr-only" for="contact-agent">选择联系人 Agent</label><select id="contact-agent" disabled><option value="" disabled hidden>请选择 Agent</option></select><p id="contact-agent-hint" hidden>在 AI 中心配置电商、财务或你开发好的 Agent，再为每位联系人独立选择。</p><button class="text-button" id="ai-manage">管理 Agent<span data-icon="arrow"></span></button></div>
             <button class="button secondary full-width" id="retry-listener"><span data-icon="refresh"></span>重新建立监听</button>
             <div class="demo-controls" id="demo-controls" hidden><label class="field-label" for="demo-message">模拟联系人发来消息</label><div class="demo-input"><input id="demo-message" placeholder="仅用于演示环境"><button class="icon-button" id="demo-inject" aria-label="注入演示消息"><span data-icon="send"></span></button></div></div>
           </div>
@@ -114,16 +113,6 @@
       <main id="view-contacts" class="page-view" hidden><div class="page-intro"><div><span class="eyebrow">CONTACTS</span><h2>只连接需要的对话</h2><p>按微信号核验私聊身份，按完整群名连接群聊；分别配置消息监听规则。</p></div><button id="sync-avatars" class="button secondary avatar-sync"><span data-icon="refresh"></span>同步头像</button></div><label class="search-field table-search"><span data-icon="search"></span><input type="search" id="contact-search" placeholder="搜索备注、昵称、群名或微信号" aria-label="搜索联系人"></label><div class="table-wrap"><table><thead><tr><th>联系人</th><th>微信号 / 会话类型</th><th>消息监听</th><th>会话模式</th><th>操作</th></tr></thead><tbody id="contacts-table"></tbody></table><div id="contacts-empty" class="table-empty" hidden>还没有添加联系人。点击右上角“添加联系人”开始。</div></div></main>
 
       <main id="view-status" class="page-view" hidden><div class="page-intro"><div><span class="eyebrow">SYSTEM STATUS</span><h2>每一段连接，都有迹可循</h2><p>查看微信连接和消息同步状态。</p></div><button class="button secondary" id="reconnect"><span data-icon="refresh"></span>重启微信连接</button></div><div id="status-cards" class="status-cards"></div><div class="activity-section"><h3>最近的操作</h3><div id="activity-list"></div></div></main>
-
-      <main id="view-agent" class="page-view" hidden><div class="page-intro"><div><span class="eyebrow">AGENT CONNECTION</span><h2>从消息，到行动</h2><p>供你的外部服务读取已核验的入站消息；自动回复可在 AI 中心配置。</p></div><span class="pill">游标事件接口</span></div><div class="agent-doc"><div class="agent-symbol"><span data-icon="spark"></span></div><h3>让你的 Agent 接收经核验的入站消息</h3><p>通过游标读取新收到的文本消息。历史同步、本人发出的消息和方向待识别的消息，不会作为用户请求交给 Agent。</p><div class="endpoint"><span>GET</span><code>/api/agent/events?after=&lt;event_id&gt;</code></div><p>启用时在服务环境中配置 <code>WECHAT_PANEL_AGENT_TOKEN</code>，调用时使用 Bearer 身份验证。</p><pre>{
-  "event_id": 42,
-  "account_id": "当前微信账号",
-  "contact_id": "已核验的联系人 ID",
-  "wechat_id": "联系人微信号",
-  "message_id": 18,
-  "text": "用户发来的消息",
-  "received_at": "接收时间"
-}</pre><div class="agent-rule"><span data-icon="shield"></span><p>在 AI 中心配置工具执行策略：预设工具自动执行，其他工具在面板确认后执行。此只读事件接口不授予发送或执行任务的权限。</p></div></div></main>
 
       <main id="view-ai" class="page-view ai-center" hidden>
         <div class="ai-hero"><div><span class="eyebrow">RELAY INTELLIGENCE / 01</span><h2>为每一段对话，安排合适的 Agent。</h2><p>选择助手、启用所需能力，让每段对话各得其所。</p></div></div>

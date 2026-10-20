@@ -1,6 +1,7 @@
 """Shared eligibility and per-member context boundaries for group conversations."""
 import hashlib
 import json
+import re
 
 
 RULE_FIELDS = {'group_members', 'group_mention_only', 'group_self_name'}
@@ -51,15 +52,22 @@ def member_scope(base, sender):
     return base + ':group-member:' + hashlib.sha256(sender.encode('utf-8')).hexdigest()[:24]
 
 
-def context(ai, contact, agent, trigger_id, sender, forget_before=0):
+def request_text(contact, text):
+    """Remove only the verified own mention when interpreting a chat command."""
+    own=contact.get('group_self_name','')
+    if not own or not contact.get('group_self_name_verified'):return text
+    return re.sub(r'(?<![\w@])@'+re.escape(own)+r'(?=$|[\s\u2005\u2009\u200b，。！？、,:;!?：；])','',text).strip()
+
+
+def context(ai, contact, agent, trigger_id, sender, forget_before=0, exclude_ids=()):
     """Only this member's eligible turns and replies actually sent for them."""
     boundary = max(contact.get('ai_context_start_message', 0), forget_before)
     rows = ai.store.messages(contact['id'], before=trigger_id + 1 if trigger_id else None, limit=200)
     result = []
     for message in rows:
-        if (message['id'] <= boundary or message.get('text_pending')
+        if (message['id'] <= boundary or message['id'] in exclude_ids or message.get('text_pending')
                 or message['status'] not in ('observed', 'confirmed')
-                or message['kind'] not in ('text', 'image') or message.get('historical')):continue
+                or message['kind'] not in ('text', 'image', 'voice') or message.get('historical')):continue
         if message['direction'] == 'incoming':
             if not qualifies(contact, message) or message['sender'] != sender:continue
             role = 'user'
@@ -69,6 +77,10 @@ def context(ai, contact, agent, trigger_id, sender, forget_before=0):
             if run['agent_id'] != agent['id'] or run['state'].get('group_sender') != sender:continue
             role = 'assistant'
         else:continue
-        text = message['text'] if message['kind'] == 'text' else '[图片，消息编号 ' + str(message['id']) + ']'
+        text = ('[已通过微信原生语音发送] ' + message['text'] if message['kind'] == 'voice'
+                else message['text'] if message['kind'] == 'text' else '[图片，消息编号 ' + str(message['id']) + ']')
+        if message['kind']=='text':
+            from .quoted_context import history_text
+            text=history_text(message)
         result.append({'role':role, 'content':text})
     return result[-ai.data.settings()['context_messages']:]

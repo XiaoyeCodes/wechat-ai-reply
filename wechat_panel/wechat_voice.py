@@ -132,7 +132,7 @@ def signal_similarity(source,recorded):
     return float(np.max(np.correlate(a,b,'full'))/denominator) if denominator>1e-8 else 0
 
 
-def send_wav(bridge,contact,path,before_send=None):
+def send_wav(bridge,contact,path,before_send=None,interruption_guard=None):
     import numpy as np
     import sounddevice as sd
     import win32gui
@@ -163,7 +163,7 @@ def send_wav(bridge,contact,path,before_send=None):
     try:
         with RealtekLoopback(Path(bridge.trace_path).with_name('voice-route.json')) as route:
             try:
-                focused();recording=True;route.recording=True;bridge._click(start,contact,'voice.record')
+                focused();recording=True;route.recording=True;bridge._voice_recording=True;bridge._click(start,contact,'voice.record')
                 time.sleep(.5);route.check(window.process_id())
                 with sd.InputStream(device=route.input,samplerate=48000,channels=2,
                                     callback=lambda data,*args:captured.append(data.copy())):
@@ -181,8 +181,9 @@ def send_wav(bridge,contact,path,before_send=None):
                     from .voice_reply import ReplySuperseded
                     # The serial worker cannot poll while recording. Read once
                     # before sending so a new incoming turn wins immediately.
-                    if any(m['key'] not in before and m['direction'] in ('incoming','outgoing')
-                           for m in bridge.snapshot(contact)):
+                    new=[m for m in bridge.snapshot(contact) if m['key'] not in before
+                         and m['direction'] in ('incoming','outgoing')]
+                    if (interruption_guard(new) if interruption_guard else bool(new)):
                         raise ReplySuperseded('录音期间聊天有新消息，本条语音已取消，将合并新消息回复')
                     before_send()
                 if bridge._title(window)!=contact['lookup']:raise BridgeError('录音目标联系人发生变化')
@@ -195,6 +196,7 @@ def send_wav(bridge,contact,path,before_send=None):
                 recording=False;route.recording=False
             finally:
                 sd.stop()
+                bridge._voice_recording=False
                 if recording:
                     cancel();route.recording=False
         for _ in range(20):

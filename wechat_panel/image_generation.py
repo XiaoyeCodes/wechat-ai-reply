@@ -28,6 +28,17 @@ def reference_for(runtime,run,state,media,args):
     if explicit:
         chosen=memory.read_media(explicit)
         if chosen['scope'] not in permitted:raise ValueError('参考图不属于当前会话')
+        if state.get('group_sender') and chosen['scope']!=scope:
+            with runtime.ai.store.connect() as db:
+                source=db.execute('SELECT 1 FROM messages WHERE contact_id=? AND media_id=? AND sender=? AND sender_verified=1 AND historical=0 AND id>?',
+                    (run['contact_id'],explicit,state['group_sender'],state.get('context_binding_start',0))).fetchone()
+            if not source:
+                for ref in state.get('input_images',[]):
+                    quoted=runtime.ai.store.message(ref['quote_message_id']) if ref.get('quote_message_id') else None
+                    if (quoted and quoted['contact_id']==run['contact_id'] and quoted.get('sender_verified')
+                            and quoted['sender']==state['group_sender'] and quoted.get('quote',{}).get('media_id')==explicit):
+                        source=True;break
+            if not source:raise ValueError('参考图不属于当前发言成员')
     elif mode=='edit':
         refs=list(state.get('input_images',[]))
         if state.get('input_media_id'):

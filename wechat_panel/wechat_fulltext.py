@@ -136,7 +136,7 @@ class FulltextLedger:
                        (body,contact['account_id'],contact['id'],key))
 
 
-def hydrate(bridge, window, contact, candidates, new_keys=None):
+def hydrate(bridge, window, contact, candidates, new_keys=None,active_keys=None):
     """Copy a new message once; reuse durable results without touching the UI."""
     if not hasattr(bridge, 'fulltext_cache'):
         bridge.fulltext_cache, bridge.fulltext_pending = {}, {}
@@ -155,6 +155,7 @@ def hydrate(bridge, window, contact, candidates, new_keys=None):
             pending = bridge.fulltext_pending.setdefault(key, {'attempted':False})
             if new_keys is not None and key in new_keys:pending['new'] = True
             eligible = new_keys is None or pending.get('new',False)
+            if active_keys is not None and key not in active_keys:eligible=False
             if not attempted and not pending['attempted'] and eligible:
                 attempted = True
                 pending['attempted'] = True

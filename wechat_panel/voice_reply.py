@@ -83,6 +83,16 @@ def speech_text(text):
     return text if 2<=len(text)<=200 and re.search(r'[\w\u4e00-\u9fff]',text) else None
 
 
+def recording_interrupted(contact, state, items):
+    if state.get('agent_schedule'):return False
+    if contact.get('chat_type') != 'group':return bool(items)
+    from .group_chats import qualifies
+    sender = state.get('group_sender')
+    return any(item.get('direction') == 'outgoing' or
+               item.get('direction') == 'incoming' and not item.get('sender_verified') or
+               qualifies(contact, item) and item.get('sender') == sender for item in items)
+
+
 def deliver(bridge,store,message,contact,*,demo=False):
     """Send once; only synthesis failure before recording may fall back to text."""
     current=store.contact(contact['id'])
@@ -137,7 +147,12 @@ def deliver(bridge,store,message,contact,*,demo=False):
             else:
                 ensure_current();mark('voice')
                 trace('原生语音发送',{'characters':len(text),'duration':round(seconds,2),'voice':selected_voice['voice'],'voice_name':selected_voice['name'],'voice_preset':voice_id,'model':selected_voice.get('model','')})
-                receipt=bridge.send_voice(contact,path,before_send=ensure_current)
+                kwargs={'before_send':ensure_current}
+                if contact.get('chat_type')=='group' and message.get('ai_run_id'):
+                    from .ai_store import AIStore
+                    state=AIStore(store).run(message['ai_run_id'])['state']
+                    kwargs['interruption_guard']=lambda items:recording_interrupted(current,state,items)
+                receipt=bridge.send_voice(contact,path,**kwargs)
                 trace('原生语音已核对',{'source_key':receipt['key'],'bubble':receipt['text']})
                 return {'source_key':receipt['key'],'delivery':'voice'}
     ensure_current();mark('text')

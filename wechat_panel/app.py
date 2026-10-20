@@ -162,6 +162,10 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
     def contact_avatar(contact_id: str, own: bool = False):
         return Response(app.state.store.avatar(contact_id, own), media_type='image/png')
 
+    @app.get('/api/contacts/{contact_id}/member-avatar')
+    def member_avatar(contact_id: str, sender: str):
+        return Response(app.state.store.member_avatar(contact_id, sender), media_type='image/png')
+
     @app.post('/api/contacts/sync-avatars')
     async def sync_avatars():
         if app.state.store.paused():

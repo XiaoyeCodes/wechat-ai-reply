@@ -35,6 +35,29 @@ def test_click_never_clicks_persistent_covering_window(monkeypatch):
         obj._click(control,{},'test')
 
 
+@pytest.mark.parametrize('same_process,own_menu', [(True,True),(False,True),(True,False)])
+def test_qt_menu_click_requires_its_own_uia_ancestry_and_wechat_process(monkeypatch,same_process,own_menu):
+    from pywinauto.win32structures import RECT
+    import win32process
+    obj=WeixinBridge.__new__(WeixinBridge);clicks=[]
+    parent=SimpleNamespace(element_info=SimpleNamespace(runtime_id=(42,456)),parent=lambda:None)
+    control=SimpleNamespace(rectangle=lambda:RECT(100,100,200,200),top_level_parent=lambda:SimpleNamespace(handle=123),
+        element_info=SimpleNamespace(control_type='MenuItem',runtime_id=(42,456,4,99)),process_id=lambda:10,parent=lambda:parent)
+    control.wrapper_object=lambda:control
+    obj.desktop=SimpleNamespace(from_point=lambda *args:SimpleNamespace(element_info=SimpleNamespace(runtime_id=(42,456) if own_menu else (42,789))))
+    obj._record=lambda *a,**kw:None
+    monkeypatch.setattr(win32gui,'WindowFromPoint',lambda p:456)
+    monkeypatch.setattr(win32gui,'GetAncestor',lambda h,flag:h)
+    monkeypatch.setattr(win32process,'GetWindowThreadProcessId',lambda h:(1,10 if same_process else 20))
+    monkeypatch.setattr(module.time,'sleep',lambda _:None)
+    monkeypatch.setattr(pyautogui,'click',lambda *args,**kw:clicks.append(args))
+    if same_process and own_menu:
+        obj._click(control,{},'test-menu');assert clicks==[(150,150)]
+    else:
+        with pytest.raises(module.DesktopBusy):obj._click(control,{},'test-menu')
+        assert not clicks
+
+
 def test_send_baseline_counts_existing_bubbles_with_trimmed_edges():
     obj = WeixinBridge.__new__(WeixinBridge)
     obj.Lists = SimpleNamespace(FriendChatList={})

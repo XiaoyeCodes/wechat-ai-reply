@@ -516,7 +516,20 @@ class WeixinBridge:
                 raise BridgeError('目标控件不可见，已停止操作')
             point = (rect.mid_point().x, rect.mid_point().y)
             hit = win32gui.GetAncestor(win32gui.WindowFromPoint(point), 2)
-            if hit == root:
+            menu_hit = False
+            if (hit != root and getattr(getattr(control,'element_info',None),'control_type',None) == 'MenuItem'):
+                # Qt menus can have their own HWND outside the chat's bounds.
+                # Accept only this exact UIA menu item in the same process.
+                import win32process
+                under = self.desktop.from_point(*point)
+                if win32process.GetWindowThreadProcessId(hit)[1] == control.process_id():
+                    ancestor = control.wrapper_object()
+                    for _ in range(4):
+                        if tuple(under.element_info.runtime_id) == tuple(ancestor.element_info.runtime_id):
+                            menu_hit = True;break
+                        ancestor = ancestor.parent()
+                        if ancestor is None:break
+            if hit == root or menu_hit:
                 if contact and contact.get('chat_type')=='group' and action.endswith('send_once'):
                     target=self.windows.get(contact['id'])
                     self._check_account(contact)
@@ -813,6 +826,22 @@ class WeixinBridge:
             if window is not None:
                 return window
             time.sleep(0.1)
+        # Some Weixin layouts ignore the session double-click but expose the
+        # same operation explicitly in that exact session's context menu.
+        if win32gui.GetAncestor(win32gui.WindowFromPoint(point), 2) != main.handle:
+            raise DesktopBusy('联系人会话被遮挡，稍后自动重新连接')
+        matches[0].click_input(button='right')
+        menu = main.child_window(title_re='^(独立窗口显示|在独立窗口中打开|在獨立視窗中開啟|Open in (?:a )?[Ss]eparate [Ww]indow)$', control_type='MenuItem')
+        try:
+            menu.wait('visible', timeout=2)
+            self._click(menu, contact, 'ui.open_dialog.menu')
+            deadline = time.monotonic()+3
+            while time.monotonic()<deadline:
+                window = self._find_dialog(contact)
+                if window is not None:return window
+                time.sleep(.1)
+        finally:
+            if menu.exists(timeout=.1) and menu.is_visible():main.type_keys('{ESC}')
         raise ConnectionLost('微信尚未打开目标聊天窗口，稍后自动重新连接')
 
     def attach(self, contact, for_send=False):
@@ -890,7 +919,7 @@ class WeixinBridge:
             key = (contact['account_id'], contact['wechat_id'])
             window = self.windows.get(contact['id'])
             try:
-                if window is not None and window.exists(timeout=0.1) and self._title(window) == contact['lookup']:
+                if contact.get('chat_type') != 'group' and window is not None and window.exists(timeout=0.1) and self._title(window) == contact['lookup']:
                     listing = window.child_window(**self.Lists.FriendChatList)
                     rows = listing.children()
                     layout = [(r.window_text(), str(r.rectangle())) for r in rows]
@@ -914,7 +943,7 @@ class WeixinBridge:
                         self.avatar_cache.update(pending)
             except Exception:
                 pass
-            if locate and key not in self.avatar_cache and not contact.get('avatar_url'):
+            if locate and (contact.get('chat_type') == 'group' or key not in self.avatar_cache and not contact.get('avatar_url')):
                 self._search_unique(contact['lookup'],chat_type='group') if contact.get('chat_type')=='group' else self._search_unique(contact['lookup'])
                 if self.search_avatar and self.search_avatar[0] == contact['lookup']:
                     self._check_account(contact)
@@ -956,6 +985,10 @@ class WeixinBridge:
 
     def _direction(self, item, window, contact, frame=None, visible_bounds=None):
         text = item.window_text()
+        if contact.get('chat_type') == 'group' and contact.get('group_self_name_verified'):
+            from .group_senders import cached_sender
+            sender = cached_sender(self, window, contact, item)
+            if sender:return ('outgoing' if sender == contact.get('group_self_name') else 'incoming'),text
         if item.element_info.control_type == 'CheckBox':
             if contact.get('chat_type')=='group':
                 from .group_bridge import observe_group_row
@@ -1005,14 +1038,27 @@ class WeixinBridge:
         listing = window.child_window(**self.Lists.FriendChatList)
         if not listing.exists(timeout=0.3):
             raise ConnectionLost('聊天消息列表暂时不可用，正在重新连接')
+        from .wechat_reads import follow_unread
+        followed=follow_unread(self,window,contact)
+        if followed:time.sleep(.15)
         rows = listing.children()
+        from .wechat_reads import observe as observe_reads
+        from .group_senders import stamp as row_stamp
+        gate,read_rows=observe_reads(self,window,contact,rows,self._capture(window),listing.rectangle(),followed)
+        if contact.get('chat_type') == 'group':
+            from .group_senders import hydrate
+            try:hydrate(self, window, contact, rows,read_rows,gate)
+            except Exception as exc:
+                self._record('ui.group.sender.unavailable', contact, error=str(exc))
+            rows = listing.children()
         layout = [(row.window_text(), str(row.rectangle())) for row in rows]
         frame = self._capture(window)
         clip=listing.rectangle()
         items = []
         photos=[]
         folded_texts=[]
-        previous={i['key'] for i in self.previous_items.get(contact['id'],[])}
+        quoted_images=[]
+        read_keys=set()
         for row in rows:
             cls = row.class_name()
             if 'Chat' not in cls:
@@ -1047,25 +1093,52 @@ class WeixinBridge:
                               direction_verified=direction in ('incoming','outgoing')))
             if contact.get('chat_type')=='group':
                 from .group_bridge import observe_group_row
+                from .group_senders import cached_sender, stamp
                 names=getattr(self,'group_rosters',{}).get((contact['account_id'],contact['wechat_id']))
-                evidence=observe_group_row(row,contact,direction,text,names)
+                evidence=observe_group_row(row,contact,direction,text,names,cached_sender(self,window,contact,row))
                 items[-1].update(evidence)
+                items[-1]['native_key']=f'{window.handle}:{runtime}'
+                header=getattr(self,'group_observed_headers',{}).get((contact['account_id'],contact['wechat_id'],window.handle),{}).get(stamp(row))
+                if header:items[-1]['sender_header']=header.hex()
+                if evidence['sender_verified']:
+                    member_avatar=row_avatar(frame,row.rectangle(),(clip.left,clip.top,clip.right,clip.bottom),outgoing=direction=='outgoing')
+                    if member_avatar:items[-1]['sender_avatar_data']=base64.b64encode(member_avatar).decode()
                 # Sender identity is part of the raw content identity too;
                 # Qt can recycle a runtime ID for another member's same text.
                 identity_digest=hashlib.sha256(evidence['identity_text'].encode()).hexdigest()[:16]
                 items[-1]['key']=key=f'{window.handle}:{runtime}:{identity_digest}'
+            token=row_stamp(row)
+            if token in gate.admission_tokens:
+                items[-1]['raw_key']=key
+                items[-1]['key']=key=f'{window.handle}:live:{gate.admission_tokens[token]}'
+            if token in read_rows:read_keys.add(key)
+            if token in gate.fresh_tokens:items[-1]['native_fresh']=True
             if photo:items[-1]['image_data']=photo
+            if kind=='text':
+                from .wechat_quotes import split_quote
+                quoted=split_quote(items[-1]['text'],cls)
+                if quoted:
+                    items[-1].setdefault('identity_text',items[-1]['text'])
+                    items[-1].update(quoted)
+                    if quoted['quote']['kind']=='image' and direction in ('incoming','unknown'):
+                        from .wechat_quotes import fingerprint
+                        reference=fingerprint(quoted['quote'],row,frame,clip)
+                        if reference:
+                            quoted['quote']['reference_fingerprint']=reference
+                            quoted['quote']['proof']=hashlib.sha256((quoted['quote']['proof']+reference).encode()).hexdigest()
+                        if contact.get('_read_images'):quoted_images.append((items[-1],tuple(row.element_info.runtime_id),text))
+                        else:items[-1]['quote'].update(status='disabled',error='当前 Agent 未配置图片理解或图生图。')
             if kind=='text' and direction=='incoming':
                 from .wechat_fulltext import folded
-                if folded(text):folded_texts.append((items[-1],tuple(row.element_info.runtime_id)))
-            if kind=='image' and contact.get('_read_images') and contact['id'] in self.previous_items and key not in previous:
+                if not items[-1].get('quote') and folded(text):folded_texts.append((items[-1],tuple(row.element_info.runtime_id)))
+            if kind=='image' and contact.get('_read_images') and key in read_keys:
                 self.image_pending.setdefault(key,{'attempts':0,'due':0})
             if kind=='image' and direction=='incoming' and contact.get('_read_images'):
                 # AI must see the copied image itself, not a partly rendered
                 # thumbnail or surrounding chat UI.
                 items[-1].pop('image_data',None)
                 if key in self.image_cache:items[-1]['image_data']=self.image_cache[key]
-                elif key in self.image_pending or (contact['id'] in self.previous_items and key not in previous):
+                elif key in self.image_pending and key in read_keys:
                     self.image_pending.setdefault(key,{'attempts':0,'due':0})
                     photos.append((items[-1],tuple(row.element_info.runtime_id)))
         items = items[-150:]
@@ -1074,12 +1147,21 @@ class WeixinBridge:
         # Keep the previous observation for this tick instead of misattributing it.
         if layout != [(row.window_text(), str(row.rectangle())) for row in listing.children()]:
             return self.previous_items.get(cid, [])
+        if contact.get('chat_type')=='group':
+            from .group_chats import qualifies
+            read_keys.difference_update(item['key'] for item in items if item.get('sender_verified')
+                and item['kind']=='text' and not qualifies(contact,item))
+            senders={item['sender'] for item in items if item['key'] in read_keys
+                and item['kind']=='text' and qualifies(contact,item) and not item.get('quote')}
+            photos=[(item,rid) for item,rid in photos if item.get('sender_verified') and item.get('sender') in senders]
+        if quoted_images:
+            from .wechat_quotes import hydrate
+            hydrate(self,window,contact,quoted_images,read_keys,active_keys=read_keys)
         if folded_texts:
             from .wechat_fulltext import hydrate
-            from .snapshots import compare
-            delta = compare(self.previous_items.get(cid),items)
-            new_keys = {item['key'] for item in delta.items} if not delta.historical else set()
-            hydrate(self,window,contact,folded_texts,new_keys=new_keys)
+            fulltext_keys=read_keys if contact.get('chat_type')!='group' else {
+                item['key'] for item,_ in folded_texts if item['key'] in read_keys and qualifies(contact,item)}
+            hydrate(self,window,contact,folded_texts,new_keys=fulltext_keys,active_keys=fulltext_keys)
         available=[p for p in photos if self.image_pending[p[0]['key']]['attempts']<3 and time.monotonic()>=self.image_pending[p[0]['key']]['due']]
         for item,runtime_id in available[:1]:
             pending=self.image_pending[item['key']]
@@ -1090,8 +1172,9 @@ class WeixinBridge:
                     item['image_data']=base64.b64encode(data).decode()
                     self.image_cache[item['key']]=item['image_data']
                     self.image_pending.pop(item['key'],None)
-                except Exception:
+                except Exception as exc:
                     pending['attempts']+=1;pending['due']=time.monotonic()+5
+                    self._record('receive.image.retry',contact,attempt=pending['attempts'],error=str(exc))
                     item['image_error']='图片原图暂未取得；请保持图片可见或在测试台上传图片。'
             # Keep the cache bounded; DB media is the durable copy.
             if len(self.image_cache)>30:self.image_cache.pop(next(iter(self.image_cache)))
@@ -1151,11 +1234,11 @@ class WeixinBridge:
         from .wechat_files import send_pdf
         return send_pdf(self, contact, path)
 
-    def send_voice(self, contact, path, before_send=None):
+    def send_voice(self, contact, path, before_send=None, interruption_guard=None):
         from .wechat_voice import send_wav
         import win32gui
         foreground=win32gui.GetForegroundWindow()
-        try:return send_wav(self, contact, path, before_send=before_send)
+        try:return send_wav(self, contact, path, before_send=before_send, interruption_guard=interruption_guard)
         finally:
             window=self.windows.get(contact['id'])
             if window and foreground:
@@ -1227,7 +1310,8 @@ class WeixinBridge:
             self._record('ui.input.paste', contact)
             pyautogui.hotkey('ctrl', 'v', _pause=False)
             time.sleep(0.2)
-            if edit.window_text().replace('\r\n','\n') != text.replace('\r\n','\n'):
+            from .wechat_text import pasted_text_matches
+            if not pasted_text_matches(self,window,edit,contact,text):
                 raise SendUncertain('粘贴内容无法核对，尚未按发送键；请检查微信输入框')
             if win32gui.GetAncestor(win32gui.GetForegroundWindow(), 2) != window.handle:
                 raise SendUncertain('发送前焦点发生变化，请检查微信输入框')

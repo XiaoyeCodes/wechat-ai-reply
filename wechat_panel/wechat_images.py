@@ -159,7 +159,6 @@ def fresh_clipboard_image(before,timeout=4):
 
 def copy_bubble(bridge,window,contact,runtime_id):
     import win32gui
-    import win32process
     import win32clipboard as cb
     from pywinauto import mouse
     foreground=win32gui.GetForegroundWindow();hosted=bridge.window_host.managed(window.handle)
@@ -177,7 +176,9 @@ def copy_bubble(bridge,window,contact,runtime_id):
             raise ValueError('图片方向或可见区域尚未确认')
         # The leading edge of every incoming image starts at 70 DIP, after its
         # avatar. Click inside that bubble, not the full row's center.
-        point=(rect.left+round(85*frame[2]),rect.top+round(22*frame[2]))
+        # Group rows include a sender-name header above the image bubble.
+        # Clicking that header opens member actions instead of image Copy.
+        point=(rect.left+round(85*frame[2]),rect.top+round((44 if contact.get('chat_type')=='group' else 22)*frame[2]))
         if not (rect.left<point[0]<rect.right and rect.top<point[1]<rect.bottom):raise ValueError('图片控件坐标无效')
         if win32gui.GetAncestor(win32gui.WindowFromPoint(point),2)!=window.handle:raise ValueError('图片控件被遮挡')
         mouse.click(button='right',coords=point)
@@ -198,23 +199,7 @@ def copy_bubble(bridge,window,contact,runtime_id):
         before=cb.GetClipboardSequenceNumber()
         # Qt advertises InvokePattern but does not copy on Invoke. A verified
         # native click is required; sequence change is part of success criteria.
-        rect=menu.rectangle();point=(rect.mid_point().x,rect.mid_point().y)
-        target=win32gui.WindowFromPoint(point)
-        # Qt popups have their own native root, although their UIA parent is
-        # the chat. Verify the actual popup and process instead of comparing
-        # the UIA root with the native root (they intentionally differ).
-        hit=bridge.desktop.from_point(*point)
-        expected=tuple(hit.element_info.runtime_id)
-        ancestor=menu.wrapper_object()
-        matched=False
-        for _ in range(4):
-            if tuple(ancestor.element_info.runtime_id)==expected:matched=True;break
-            ancestor=ancestor.parent()
-            if ancestor is None:break
-        if (not target or win32process.GetWindowThreadProcessId(target)[1]!=win32process.GetWindowThreadProcessId(window.handle)[1]
-                or not matched or hit.class_name() not in ('mmui::XMenu','mmui::XMenuView') or rect.width()<=0 or rect.height()<=0):
-            raise ValueError('图片复制菜单被遮挡，停止点击')
-        menu.click_input()
+        bridge._click(menu,contact,'ui.image.copy')
         data,copied_seq=fresh_clipboard_image(before)
         return data
     finally:
