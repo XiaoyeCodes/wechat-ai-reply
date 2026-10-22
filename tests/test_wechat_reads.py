@@ -12,6 +12,21 @@ GROUP={'chat_type':'group','mode':'ai_auto','listening':True,'_read_images':True
 DIRECT=GROUP|{'chat_type':'direct'}
 
 
+@pytest.mark.parametrize('body,question',[
+    ('@Aria\u2005只回复OK','只回复OK'),
+    ('请@Aria\u2005只回复OK','请\u2005只回复OK'),
+    ('请只回复OK@Aria\u2005','请只回复OK'),
+    ('@Aria\u2005开头，中间@Aria\u2005，以及末尾@Aria\u2005','开头，中间\u2005，以及末尾'),
+])
+def test_native_mention_at_any_position_admits_request_without_a_leading_space(body,question):
+    from wechat_panel.group_chats import request_text
+    contact=GROUP|{'group_self_name':'Aria'}
+    gate=ReadGate();rows=[item('anchor')];gate.observe(GROUP,rows,0)
+    rows+=[item('question',body)]
+    assert set(gate.observe(contact,rows,1))=={'question'}
+    assert request_text(contact,rows[-1]['text'])==question
+
+
 def item(key,text='一段有足够长度的普通历史消息',kind='text',direction='incoming'):
     return {'key':key,'native_token':key,'text':text,'kind':kind,'direction':direction}
 

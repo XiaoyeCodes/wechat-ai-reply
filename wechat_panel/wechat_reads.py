@@ -57,7 +57,8 @@ def requested(contact, item):
     body=quoted['text'] if quoted else item['text']
     body='\n'.join(line for line in body.splitlines() if not line.lstrip().startswith(('>','＞')))
     body=re.sub(r'“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"','',body)
-    return bool(re.search(r'(?<![\w@])@'+re.escape(own)+r'(?=$|[\s\u2005\u2009\u200b，。！？、,:;!?：；])',body))
+    from .group_chats import mention_pattern
+    return bool(re.search(mention_pattern(own),body))
 
 
 class ReadGate:

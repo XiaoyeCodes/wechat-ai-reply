@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
@@ -245,6 +246,10 @@ class WeixinBridge:
         self.Contacts, self.Navigator, self.Tools = Contacts, Navigator, Tools
         self.Main, self.SideBar, self.Lists, self.Texts, self.Edits = Main_window, SideBar, Lists, Texts, Edits
         self.Buttons, self.Labels = Buttons, Special_Labels
+        # Some Chinese WeChat builds expose the chats tab as "WeChat".
+        # It is a navigation label, independent of the logged-in account.
+        self.SideBar.Weixin.pop('title', None)
+        self.SideBar.Weixin['title_re'] = r'^(微信|微信聊天|Weixin|WeChat|Chats)$'
         # Weixin 4.1.15 exposes an empty accessible name for the search edit.
         # Match its dedicated class instead; upstream helpers share this selector.
         self.Main.Search.pop('title', None)
@@ -275,7 +280,7 @@ class WeixinBridge:
     def _host_matches(self, handle, record):
         window = self.desktop.window(handle=handle)
         return (self.account_id == record['account_id']
-                and self.Tools.get_current_wxid() == self.account_hint
+                and self._login_hint() == self.account_hint
                 and window.class_name() == 'mmui::ChatSingleWindow'
                 and self._title(window) == record['lookup'])
 
@@ -324,7 +329,20 @@ class WeixinBridge:
         main = self._main_window()
         pid = main.process_id()
         return dict(pid=pid, main_handle=main.handle, started_at=psutil.Process(pid).create_time(),
-                    hint=self.Tools.get_current_wxid())
+                    hint=self._login_hint())
+
+    def _login_hint(self):
+        # A custom account directory need not contain a wxid_* substring.
+        return self.Tools.get_current_wxid() or self.Tools.where_wxid_folder(open_folder=False)
+
+    def _forget_account(self):
+        if hasattr(self, 'window_host'):self.window_host.release_all()
+        for name in ('windows','profiles','verified_contacts','previous_items','image_cache',
+                     'image_pending','avatar_cache','group_rosters'):
+            cache = getattr(self, name, None)
+            if cache is not None:cache.clear()
+        self.account_id = self.account_hint = self.account_name = None
+        self._verified_context = None
 
     def _load_account(self):
         # Reuse a verified identity only for the same running Weixin process
@@ -335,6 +353,7 @@ class WeixinBridge:
                 self.account_id = cached['account_id']
                 self.account_hint = cached['context']['hint']
                 self.account_name = cached.get('account_name', '')
+                self._verified_context = cached['context']
         except (OSError, ValueError, KeyError, BridgeError):
             pass
 
@@ -347,10 +366,14 @@ class WeixinBridge:
         temporary.write_text(json.dumps(dict(context=context, account_id=self.account_id,
                                              account_name=self.account_name), ensure_ascii=False), encoding='utf-8')
         temporary.replace(self.account_path)
+        self._verified_context = context
 
     def _ensure_account(self, expected_account=None):
-        hint = self.Tools.get_current_wxid()
-        if self.account_hint != hint or not self.account_id:
+        hint = self._login_hint()
+        context = self._account_context()
+        if (self.account_hint != hint or not self.account_id
+                or (getattr(self,'_verified_context',None) and self._verified_context != context)):
+            self._forget_account()
             self._record('ui.own_profile')
             mine = self.Contacts.check_my_info(close_weixin=False)
             self.account_id = mine.get('微信号', '').strip()
@@ -358,12 +381,20 @@ class WeixinBridge:
             self.account_hint = hint
             self.profiles.clear()
             self.verified_contacts.clear()
-            if self.account_id in ('', '无'):
+            if self.account_id in ('', '无') or not hint:
+                self._forget_account()
                 raise BridgeError('无法读取当前微信账号身份')
+            if context != self._account_context():
+                self._forget_account()
+                raise BridgeError('核验期间微信账号发生变化，请重新连接')
             self._save_account()
         if expected_account and self.account_id != expected_account:
             raise BridgeError('当前登录的微信账号与联系人绑定的账号不一致')
         return self.account_id
+
+    def identify(self):
+        self._ensure_account()
+        return self.health()
 
     def _main_window(self):
         from .wechat_windows import discover_weixin_windows
@@ -465,6 +496,11 @@ class WeixinBridge:
     def _focus(self, window, contact):
         import win32gui
         import win32con
+        def foreground_root():
+            handle = win32gui.GetForegroundWindow()
+            if not handle:return 0
+            try:return win32gui.GetAncestor(handle, 2)
+            except win32gui.error:return 0
         if hasattr(self, 'window_host'):
             self.window_host.reveal(window.handle)
         if win32gui.IsIconic(window.handle):
@@ -476,7 +512,7 @@ class WeixinBridge:
             if win32gui.IsIconic(window.handle):
                 raise BridgeError('聊天窗口未能自动还原，请检查微信窗口后重试发送')
             time.sleep(0.2)  # Let Qt lay out the input and message list again.
-        if win32gui.GetAncestor(win32gui.GetForegroundWindow(), 2) != window.handle:
+        if foreground_root() != window.handle:
             self._record('ui.focus', contact)
             try:
                 win32gui.SetForegroundWindow(window.handle)
@@ -488,9 +524,10 @@ class WeixinBridge:
                 import win32api
                 import win32process
                 current = win32api.GetCurrentThreadId()
-                foreground, _ = win32process.GetWindowThreadProcessId(win32gui.GetForegroundWindow())
+                handle = win32gui.GetForegroundWindow()
+                foreground = win32process.GetWindowThreadProcessId(handle)[0] if handle else 0
                 target, _ = win32process.GetWindowThreadProcessId(window.handle)
-                linked = [thread for thread in {foreground, target} if thread != current
+                linked = [thread for thread in {foreground, target} if thread and thread != current
                           and ctypes.windll.user32.AttachThreadInput(current, thread, True)]
                 try:
                     win32gui.BringWindowToTop(window.handle)
@@ -499,7 +536,9 @@ class WeixinBridge:
                     for thread in linked:
                         ctypes.windll.user32.AttachThreadInput(current, thread, False)
             time.sleep(0.1)
-        if win32gui.GetAncestor(win32gui.GetForegroundWindow(), 2) != window.handle:
+        deadline = time.monotonic()+1
+        while foreground_root() != window.handle and time.monotonic()<deadline:time.sleep(.05)
+        if foreground_root() != window.handle:
             raise DesktopBusy('目标聊天窗口未获得前台焦点，等待空闲后重试')
 
     def _click(self, control, contact, action):
@@ -577,6 +616,7 @@ class WeixinBridge:
     def health(self):
         import win32gui
         if not self.Tools.is_weixin_running():
+            self._forget_account()
             return dict(state='offline', detail='微信未启动，请先启动并登录微信', account_id=None)
         if not self._input_desktop():
             return dict(state='locked', detail='桌面不可操作，请解锁 Windows 后继续', account_id=self.account_id)
@@ -584,19 +624,14 @@ class WeixinBridge:
             main = self._main_window()
         except BridgeError as exc:
             if getattr(self,'_login_windows',[]) or self.desktop.windows(class_name='mmui::LoginWindow', visible_only=False):
-                self.windows.clear()
-                self.profiles.clear()
-                self.verified_contacts.clear()
-                self.account_id = self.account_hint = self.account_name = None
-                return dict(state='offline', detail='微信当前处于登录页，请先登录原账号后恢复运行', account_id=None)
+                self._forget_account()
+                return dict(state='offline', detail='微信当前处于登录页，登录后会自动加载对应账号的会话', account_id=None)
             return dict(state='unavailable', detail=str(exc), account_id=self.account_id)
-        hint = self.Tools.get_current_wxid()
-        if self.account_hint and hint != self.account_hint:
-            self.windows.clear()
-            self.profiles.clear()
-            self.verified_contacts.clear()
-            self.account_id = None
-            return dict(state='account_changed', detail='检测到微信账号变化，请重新核验联系人', account_id=None)
+        hint = self._login_hint()
+        context_changed = bool(getattr(self,'_verified_context',None) and self._verified_context != self._account_context())
+        if (self.account_hint and hint != self.account_hint) or context_changed:
+            self._forget_account()
+            return dict(state='account_changed', detail='正在识别当前微信账号并加载对应会话', account_id=None)
         if not win32gui.IsWindowVisible(main.handle) or win32gui.IsIconic(main.handle):
             independent = any(w.process_id() == main.process_id() for w in
                               self.desktop.windows(class_name='mmui::ChatSingleWindow', visible_only=False))
@@ -609,7 +644,8 @@ class WeixinBridge:
         if not self._main_controls_ready(main):
             return dict(state='unavailable', detail='微信界面控件不可访问，当前版本或账号可能不支持 UI 自动化', account_id=self.account_id)
         return dict(state='ready', detail='微信界面可访问', account_id=self.account_id,
-                    version=self.Tools.get_weixin_version())
+                    account_name=self.account_name, version=self.Tools.get_weixin_version(),
+                    session_key=f'{main.handle}:{main.process_id()}:{hint}')
 
     def reveal(self):
         status = self.health()
@@ -720,13 +756,16 @@ class WeixinBridge:
                                         process=window.process_id())
             popup.wait('visible', timeout=3)
             texts = [item.window_text() for item in popup.descendants(control_type='Text')]
-            def field(label, default=''):
-                index = texts.index(label) if label in texts else -1
+            def field(label, default='', aliases=()):
+                def normalized(value):return re.sub(r'[\s：:]+', '', value).casefold()
+                labels = {normalized(value) for value in (label, *aliases)}
+                index = next((i for i, text in enumerate(texts) if normalized(text) in labels), -1)
                 return texts[index+1].strip() if 0 <= index < len(texts)-1 else default
-            nickname = field(self.Labels.Nickname, texts[0] if texts else '')
-            remark = field(self.Labels.Remark)
-            return dict(lookup=remark if remark and remark != '无' else nickname,
-                        nickname=nickname, wechat_id=field(self.Labels.WxNum), account_id=self.account_id,
+            nickname = field(self.Labels.Nickname, texts[0] if texts else '', aliases=('昵称','暱稱','Nickname'))
+            remark = field(self.Labels.Remark, aliases=('备注','備註','Remark'))
+            if remark in ('无','無','添加备注名','新增備註名稱','Add Remark','Add remark','Set Remark'):remark=''
+            return dict(lookup=remark or nickname,
+                        nickname=nickname, wechat_id=field(self.Labels.WxNum, aliases=('微信号','微信號','WeChat ID','Weixin ID')), account_id=self.account_id,
                         avatar_data=avatar_data)
         finally:
             if popup is not None and popup.exists(timeout=0.2):
@@ -771,7 +810,7 @@ class WeixinBridge:
             raise BridgeError('群聊内部绑定标识不匹配，请重新添加核验')
 
     def _check_account(self, contact):
-        if (not self.account_hint or self.Tools.get_current_wxid() != self.account_hint
+        if (not self.account_hint or self._login_hint() != self.account_hint
                 or self.account_id != contact['account_id']):
             self.windows.clear()
             self.profiles.clear()

@@ -145,7 +145,8 @@ def observed_row(body, *, sender='张三', children=(), row_kind='ListItem', row
 
 
 @pytest.mark.parametrize('body', ['@机器人 你好', '请问 @机器人，帮我看看', '@机器人\u2005查一下',
-                                  '@机器人', '问题\n@机器人：今天的新闻'])
+                                  '@机器人', '问题\n@机器人：今天的新闻','只回复OK@机器人\u2005',
+                                  '问题@机器人\u2005请看看'])
 def test_group_visible_body_can_verify_full_self_mention_with_boundaries(body):
     result = observed_row(body)
     assert result['sender'] == '张三' and result['sender_verified']
@@ -649,7 +650,7 @@ def test_group_news_skill_fetches_before_image_and_delivers_only_to_original_gro
     assert not store.messages(contacts[1]['id']) and not store.messages(contacts[2]['id'])
     if not source_ok:
         assert steps == ['skill', 'fetch'] and len(rounds) == 3
-        assert queued[0]['kind'] == 'text' and '没有生成' in queued[0]['text']
+        assert queued[0]['kind'] == 'text' and queued[0]['text']=='我遇到点问题，未能完成该任务。'
         assert not result['state'].get('artifacts')
         return
     assert steps == ['skill', 'fetch', 'image'] and len(rounds) == 4

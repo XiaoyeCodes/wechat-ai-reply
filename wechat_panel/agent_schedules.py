@@ -85,6 +85,7 @@ def task_valid(store, run):
     task = metadata(run)
     if not task:return False
     try:
+        if run.get('contact_id') and not store.account_matches(store.contact(run['contact_id'])):return False
         with store.connect() as db:
             schedule = db.execute('SELECT * FROM agent_schedules WHERE id=?', (task['schedule_id'],)).fetchone()
             occurrence = db.execute('SELECT * FROM agent_schedule_occurrences WHERE id=?', (task['occurrence_id'],)).fetchone()
@@ -315,7 +316,12 @@ class AgentScheduler:
                     self.ai.data.update_run(delivery_id, status='cancelled', error='联系人或任务资格已变化')
                     continue
                 try:
-                    if image_ids:self.store.enqueue_ai_images(contact['id'], delivery_id, image_ids)
+                    if run['state'].get('financial_daily'):
+                        from .financial_daily import clone_artifact
+                        state.update(clone_artifact(self.store.path.parent,run,delivery_id))
+                        self.ai.data.update_run(delivery_id,state=state)
+                        self.ai._enqueue_pdf(self.ai.data.run(delivery_id))
+                    elif image_ids:self.store.enqueue_ai_images(contact['id'], delivery_id, image_ids)
                     else:self.store.enqueue_ai_reply(contact['id'], reply, delivery_id)
                     with self.store.connect() as db:
                         db.execute("UPDATE agent_schedule_recipients SET status='queued',updated_at=? WHERE run_id=?", (now(), delivery_id))

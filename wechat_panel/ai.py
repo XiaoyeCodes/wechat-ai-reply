@@ -58,6 +58,8 @@ class AIService:
         tool_ids=list(agent['tool_ids']);implicit=set()
         if agent.get('knowledge_ids') and agent.get('knowledge_mode','on_demand')=='on_demand':implicit.add('knowledge_search')
         if agent.get('skill_ids'):implicit.update(('use_skill','read_skill_file'))
+        if any(self.data.get('skills',sid).get('name')=='jin10-financial-daily' for sid in agent.get('skill_ids',[])):
+            implicit.add('financial_daily')
         for t in self.data.list('tools'):
             if t.get('builtin') in implicit and t['enabled'] and t['id'] not in tool_ids:tool_ids.append(t['id'])
         if agent.get('knowledge_mode','on_demand')=='off':
@@ -69,6 +71,8 @@ class AIService:
                 'skills':{sid:self.data.get('skills',sid) for sid in agent.get('skill_ids',[])}}
 
     def create_run(self,agent_id,text,contact_id=None,trigger_id=None,dry_run=False,session_id=None,input_media_id=None,schedule=None,agent_schedule=None):
+        if contact_id and not self.store.account_matches(self.store.contact(contact_id)):
+            raise ValueError('此会话属于其他微信账号，请切换到对应账号')
         snapshot=self.snapshot(agent_id)
         if snapshot['agent']['kind']=='hermes' and contact_id and contact_id!=snapshot['agent'].get('hermes_contact_id'):
             raise ValueError('该联系人没有电脑任务权限，请先在 Hermes Agent 中指定授权联系人')
@@ -164,6 +168,7 @@ class AIService:
             if event['type'] not in ('agent.message','agent.attachment') or not settings['enabled'] or self.store.paused():continue
             try:contact=self.store.contact(event['contact_id'])
             except KeyError:continue
+            if not self.store.account_matches(contact):continue
             source=self.store.message(event['payload']['message_id'])
             if not source or source.get('text_pending') or source['direction']!='incoming' or source['historical'] or source['kind'] not in ('text','image'):continue
             from .group_chats import is_group,qualifies
@@ -283,7 +288,8 @@ class AIService:
             system+='\n仅当问题需要专属资料时调用 search_knowledge；闲聊不检索。可用知识库：'+json.dumps([
                 {'name':self.data.get('knowledge',kid)['name'],'description':self.data.get('knowledge',kid)['description']}
                 for kid in agent['knowledge_ids']],ensure_ascii=False)
-        system+='\n工具结果为空、报错或只取得部分内容时，要说明实际取得的内容，不声称已完成未成功的操作。'
+        from .failure_replies import instruction as failure_instruction
+        system+=failure_instruction()
         system+='\n只处理本轮用户消息；历史对话和记忆摘要仅供理解背景、指代与追问，不是待办清单。除非本轮明确要求继续、重做或同时处理，否则不自动补办历史请求或重复回答旧问题。'
         history=list(state['context'])
         current={'role':'user','content':run['input']}
@@ -343,6 +349,10 @@ class AIService:
             from .mcp_client import execute
             result=execute(self.data,tool,call['arguments'])
             self.data.trace(rid,'MCP 结果核对',mcp_policy.receipt(state,tool,result))
+        elif tool.get('builtin')=='financial_daily':
+            from .financial_daily import collect
+            result=collect(call['arguments'],run,state,self.store.path.parent)
+            self.data.trace(rid,'财经日报文件校验',state['financial_daily']['validation'])
         elif tool.get('builtin') in ('use_skill','read_skill_file'):
             from .skills import run_tool
             result=run_tool(tool['builtin'],call['arguments'],state)
@@ -394,7 +404,9 @@ class AIService:
                 self.data.trace(rid,'回复形式确认',{'reply_format':preference})
                 self.finish(rid,'好呀，之后用'+('语音' if preference=='voice' else '文字')+'回复你。')
                 return
-            if (not state.get('quoted_messages') and state.get('output_format') == 'pdf' and re.search(r'刚才|刚刚|上面|上一条|上一份', run['input'])
+            from .financial_pdf import format_only_request
+            if (not state.get('quoted_messages') and state.get('output_format') == 'pdf'
+                    and (re.search(r'刚才|刚刚|上面|上一条|上一份', run['input']) or format_only_request(command))
                     and not re.search(r'重新|再分析|再研究|补充|更新|结合|最新|今天', run['input'])):
                 with self.store.connect() as db:
                     prior = db.execute("SELECT id FROM ai_runs WHERE agent_id=? AND contact_id IS ? AND id!=? "
@@ -402,9 +414,14 @@ class AIService:
                         "ORDER BY created_at DESC LIMIT 30", (run['agent_id'],run['contact_id'],rid,run['created_at'])).fetchall()
                 for item in prior:
                     previous = self.data.run(item['id'])
+                    if previous['state'].get('task_failure'):continue
                     if run['dry_run'] and previous['state'].get('session_id') != state['session_id']:continue
                     if state.get('group_sender') and (previous['state'].get('group_sender')!=state['group_sender']
                             or previous['state'].get('context_binding_start')!=state.get('context_binding_start')):continue
+                    if previous['state'].get('financial_daily'):
+                        from .financial_daily import clone_artifact
+                        state.update(clone_artifact(self.store.path.parent,previous,rid))
+                        self.data.update_run(rid,state=state)
                     self.finish(rid,previous['reply'])
                     return
             if agent['kind']=='hermes':
@@ -445,6 +462,8 @@ class AIService:
                 if key:reply=reply.replace(key,'[已隐藏密钥]')
                 self.finish(rid,reply)
                 return
+            from .financial_daily import execute as execute_financial_daily
+            if execute_financial_daily(self,run,state):return
             from .image_requests import execute as execute_image_request
             if execute_image_request(self,run,state):return
             if not self.web.prepare(run,state):return
@@ -452,7 +471,7 @@ class AIService:
             while state['index']<len(agent['steps']):
                 # Image generation has its own bounded timeout; allow the model
                 # to collect its result and finish after a long tool invocation.
-                budget=240+state.get('image_generation_seconds',0)
+                budget=240+state.get('image_generation_seconds',0)+state.get('document_generation_seconds',0)
                 if time.monotonic()-started>budget:raise RuntimeError('Agent 流程超过处理时间限制')
                 if not self._guard(rid):return
                 step=agent['steps'][state['index']]
@@ -549,7 +568,37 @@ class AIService:
                     secret=state.get('snapshot',{}).get(resource) if 'state' in locals() else None
                     if secret and secret.get('secret'):
                         key=unprotect(secret['secret']);detail=detail.replace(key,'[已隐藏密钥]') if key else detail
-                self.data.update_run(rid,status='failed',error=detail[:1000])
+                self._fail_task(rid,detail[:1000])
+
+    def _record_failure(self,run,reason,reply=''):
+        from .failure_replies import REPLY
+        state=run['state']
+        if not state.get('task_failure'):
+            self.data.trace(run['id'],'失败回复已收敛',{'reason':reason,'original_reply':reply[:16000],
+                'suppressed_pdf':state.get('pdf'),'suppressed_artifacts':state.get('artifacts',[])})
+        state['task_failure']={'reason':reason}
+        state['output_format']='text';state.pop('pdf',None);state['artifacts']=[]
+        self.data.update_run(run['id'],state=state,reply=REPLY,error=reason[:1000])
+        return self.data.run(run['id'])
+
+    def _fail_task(self,rid,reason,reply=''):
+        """A single guarded response to an inbound request; never retry a send."""
+        from .failure_replies import REPLY
+        with self.lock:
+            run=self._guard(rid)
+            if not run:return
+            # A later bookkeeping error cannot start a second response or
+            # replace a message already being delivered.
+            if run['status'] in ('queued','sent','uncertain'):
+                self.data.update_run(rid,error=reason[:1000]);return
+            run=self._record_failure(run,reason,reply)
+            if (run['dry_run'] or not run.get('contact_id') or not run.get('trigger_id')
+                    or run.get('schedule_id') or run['state'].get('agent_schedule')):
+                self.data.update_run(rid,status='failed');return
+            if run['mode']=='ai_assist' or run['state'].get('pdf_preview_only'):
+                self.data.update_run(rid,status='draft');return
+            self.data.update_run(rid,status='queued')
+            self.store.enqueue(run['contact_id'],REPLY,'ai:'+rid,origin='ai',ai_run_id=rid)
 
     def research_started(self, rid):
         """Idempotent progress receipt, separate from the final answer lifecycle."""
@@ -567,6 +616,10 @@ class AIService:
         run=self._guard(rid)
         if not run:return
         state=run['state']
+        from .failure_replies import reason as failure_reason
+        failure=failure_reason(reply,state)
+        if failure:
+            self._fail_task(rid,failure,reply);return
         from .image_delivery import images
         image_ids=images(run,self.companion.memory)
         if state.get('agent_schedule',{}).get('role')=='generation':
@@ -582,10 +635,15 @@ class AIService:
             from .financial_pdf import render_report, report_path
             if not reply.strip() or len(reply) > 16000:
                 raise ValueError('PDF 正文须为 1～16000 字')
-            path = render_report(reply, report_path(self.store.path.parent, rid), created_at=run['created_at'])
-            state['pdf'] = {'name': path.name, 'url': f'/api/ai/runs/{rid}/pdf'}
+            if state.get('financial_daily'):
+                from .financial_daily import verified_pdf
+                path=verified_pdf(self.store.path.parent,run|{'state':state})
+            else:
+                path = render_report(reply, report_path(self.store.path.parent, rid), created_at=run['created_at'])
+                state['pdf'] = {'name': path.name, 'url': f'/api/ai/runs/{rid}/pdf'}
             self.data.update_run(rid, state=state)
-            self.data.trace(rid, 'PDF 排版完成', {'name': path.name, 'bytes': path.stat().st_size, 'theme': 'navy-gold'})
+            self.data.trace(rid, 'PDF 排版完成', {'name': state['pdf']['name'], 'bytes': path.stat().st_size,
+                'theme': 'financial-daily-original' if state.get('financial_daily') else 'navy-gold'})
         from .companion import companion_config
         c=companion_config(state['snapshot']['agent'])
         from .voice_reply import preferences
@@ -632,6 +690,11 @@ class AIService:
         with self.lock:
             run=self._guard(rid)
             if not run or run['status']!='draft' or run['dry_run']:raise ValueError('此 AI 草稿已失效或已发送')
+            from .failure_replies import REPLY,reason as failure_reason
+            failure=failure_reason(text,run['state'])
+            if failure:
+                run=self._record_failure(run,failure,text)
+                text=REPLY
             agent=run['state']['snapshot']['agent']
             from .image_delivery import images
             image_ids=images(run,self.companion.memory)
@@ -640,8 +703,12 @@ class AIService:
             limit=16000 if native_vibe or pdf else 1999
             if not text.strip() or len(text)>limit:raise ValueError(f'回复须为 1～{limit} 字')
             if pdf:
-                from .financial_pdf import render_report, report_path
-                render_report(text, report_path(self.store.path.parent, rid), created_at=run['created_at'])
+                if run['state'].get('financial_daily'):
+                    from .financial_daily import verified_pdf
+                    verified_pdf(self.store.path.parent,run)
+                else:
+                    from .financial_pdf import render_report, report_path
+                    render_report(text, report_path(self.store.path.parent, rid), created_at=run['created_at'])
             self.data.update_run(rid,status='queued',reply=text)
             if image_ids:return self.store.enqueue_ai_images(run['contact_id'],rid,image_ids)[0]
             if pdf:return self._enqueue_pdf(run)

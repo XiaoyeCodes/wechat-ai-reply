@@ -122,6 +122,12 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
                 return JSONResponse({'detail':'不允许来自其他网页的请求'}, status_code=403)
             if request.method not in ('GET', 'HEAD', 'OPTIONS') and request.headers.get('x-panel-request') != '1':
                 return JSONResponse({'detail':'缺少本机面板请求标识'}, status_code=403)
+            parts = request.url.path.strip('/').split('/')
+            if len(parts) >= 3 and parts[:2] == ['api','contacts'] and parts[2] != 'sync-avatars':
+                try:contact = app.state.store.contact(parts[2])
+                except KeyError:return JSONResponse({'detail':'联系人不存在'},status_code=404)
+                if not app.state.store.account_matches(contact):
+                    return JSONResponse({'detail':'此会话属于其他微信账号，请切换到对应账号'},status_code=409)
         response = await call_next(request)
         response.headers['X-Content-Type-Options'] = 'nosniff'
         response.headers['Referrer-Policy'] = 'same-origin'
@@ -157,6 +163,10 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
     @app.get('/api/contacts')
     def contacts():
         return [contact_voice(c) for c in app.state.store.contacts()]
+
+    @app.get('/api/accounts')
+    def accounts():
+        return dict(current_account_id=app.state.store.active_account(), accounts=app.state.store.accounts())
 
     @app.get('/api/contacts/{contact_id}/avatar')
     def contact_avatar(contact_id: str, own: bool = False):
@@ -428,7 +438,16 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
         path = report_path(app.state.store.path.parent, run_id)
         if not run['state'].get('pdf') or not path.is_file():
             raise HTTPException(404, 'PDF 尚未生成')
-        return FileResponse(path, media_type='application/pdf', filename=path.name)
+        if run['state'].get('financial_daily'):
+            from .financial_daily import verified_pdf
+            verified_pdf(app.state.store.path.parent,run)
+        return FileResponse(path, media_type='application/pdf', filename=run['state']['pdf'].get('name') or path.name)
+
+    @app.get('/api/ai/runs/{run_id}/pdf/pages/{page}')
+    def ai_run_pdf_page(run_id: str,page: int):
+        from .financial_daily import preview_path
+        run=app.state.ai.data.run(run_id)
+        return FileResponse(preview_path(app.state.store.path.parent,run,page),media_type='image/png')
 
     @app.post('/api/ai/approvals/{approval_id}')
     def ai_approve(approval_id: str,body: dict):

@@ -186,7 +186,7 @@ and explicit mention entities (Hyperlink or a native Mention* control). A
     body_nodes=[n for n in nodes if _auto_id(n).rsplit('.',1)[-1] in
         {'message_content','message_text','chat_text','body','text_content','message_body'}
         and _kind(n) in ('Text','Document')]
-    body_names=list(dict.fromkeys(_name(n) for n in body_nodes if _name(n)))
+    body_names=list(dict.fromkeys(str(_value(n,'window_text','') or '') for n in body_nodes if _name(n)))
     independent_body=body_names[0] if len(body_names)==1 else None
     raw_is_body=_class(row)=='mmui::chattextitemview' and not any(
         any(part in (_auto_id(n)+' '+_class(n)) for part in ('quote','refer')) for n in all_nodes)
@@ -198,7 +198,8 @@ and explicit mention entities (Hyperlink or a native Mention* control). A
         # Markdown-style quoted lines are also data, not a fresh @ request.
         visible='\n'.join(line for line in mention_body.splitlines() if not line.lstrip().startswith(('>','＞')))
         visible=re.sub(r'“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"', '', visible)
-        pattern=r'(?<![\w@])@'+re.escape(own)+r'(?=$|[\s\u2005\u2009\u200b，。！？、,:;!?：；])'
+        from .group_chats import mention_pattern
+        pattern=mention_pattern(own)
         mention_me=bool(re.search(pattern,visible))
         mention_verified=True;mention_source='visible_text'
     identity = json.dumps([sender if sender_verified else '', bool(sender_verified), body], ensure_ascii=False)

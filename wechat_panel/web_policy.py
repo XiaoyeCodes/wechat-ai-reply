@@ -5,7 +5,7 @@ import re
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-ONLINE={'web_search','read_web','news_collect','weather','music_search','places_search','movie_search',
+ONLINE={'web_search','read_web','news_collect','financial_daily','weather','music_search','places_search','movie_search',
         'platform_search','platform_read','platform_browse','platform_transcribe'}
 NO_WEB=re.compile(r'(?:不要|不用|别|禁止|无需)(?:再|去)?(?:联网|上网|搜索|搜|查)|只(?:能)?(?:根据|用)(?:我|上述|上面|以下).{0,12}(?:资料|内容|文字)')
 EXPLICIT=re.compile(r'(?:联网|上网)(?:查|搜)?|(?:帮我|请|你可以|能不能|给我).{0,5}(?:搜|搜索|查一下|查查|查证|核实)|搜索|查一查')
@@ -188,6 +188,7 @@ class WebPolicy:
             return 'done'
         attempts=state.get('web_evidence',[])
         has_results=any(e['status']=='ok' for e in attempts)
+        if has_results:state.pop('reply_failure_reason',None)
         claim=claimed_lookup(reply) and not TRANSFORM.search(run['input']) and not conversation_only(run['input'])
         uncertain=factual(run['input']) and bool(UNCERTAIN.search(reply))
         auto=state['snapshot']['agent'].get('web_policy','auto')=='auto'
@@ -207,6 +208,7 @@ class WebPolicy:
                   '这次查询没有取得足够的匹配来源，我暂时不能确认。可以补充具体名称、截图或出处。' if attempts else
                   '这次没有进行联网查证，我暂时不能确认这个说法。')
             state['web_checked_reply']=text
+            state['reply_failure_reason']='本轮查询未取得完成任务所需的资料'
             self.ai.data.trace(run['id'],'回复核验',{'action':'使用未核实说明','attempts':len(attempts),'successful':has_results})
         else:
             sources=list(dict.fromkeys(u for e in attempts if e['status']=='ok' for u in e['sources']))

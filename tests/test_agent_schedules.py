@@ -176,6 +176,42 @@ def test_one_generation_is_anonymous_and_reused_by_exact_eligible_contacts(env):
     assert len(store.pending()) == 2 and len(calls) == 1
 
 
+def test_financial_task_retains_the_original_pdf_for_each_eligible_recipient(env):
+    # Temporary database only. No Runtime or desktop sender exists in this fixture.
+    from pypdf import PdfWriter
+    import hashlib
+    from wechat_panel import financial_daily
+    from wechat_panel.financial_pdf import report_path
+    store,ai,_,agent,contacts,_=env
+    occurrence=ai.agent_scheduler.run_now(task(ai,agent)['id'])
+    run=ai.data.run(occurrence['run_id']);state=run['state']
+    pdf=report_path(store.path.parent,run['id']);pdf.parent.mkdir(parents=True)
+    writer=PdfWriter();writer.add_blank_page(width=100,height=100);writer.write(pdf)
+    workspace=pdf.parent/'financial-daily';workspace.mkdir()
+    preview=workspace/'daily-1.png';Image.new('RGB',(10,10)).save(preview)
+    state.update(output_format='pdf',pdf={'name':'每日财经.pdf','url':f"/api/ai/runs/{run['id']}/pdf"},
+        financial_daily={'status':'ready','artifact_sha256':hashlib.sha256(pdf.read_bytes()).hexdigest(),
+                         'workspace':str(workspace),'previews':[str(preview)]})
+    ai.data.update_run(run['id'],state=state)
+    ai.finish(run['id'],'财经日报已生成')
+    pending=store.pending()
+    assert {m['contact_id'] for m in pending}=={c['id'] for c in contacts}
+    assert all(m['kind']=='file' and store.ai_send_valid(m) for m in pending)
+    for message in pending:
+        delivery=ai.data.run(message['ai_run_id'])
+        assert financial_daily.verified_pdf(store.path.parent,delivery).read_bytes()==pdf.read_bytes()
+        assert delivery['id'] in str(financial_daily.preview_path(store.path.parent,delivery,1))
+
+
+def test_failed_shared_result_stays_in_panel_without_broadcast(env):
+    store,ai,_,agent,_,_=env
+    ai.model_call=lambda *a:({'content':'我现在没有执行脚本的权限，本次任务未能完成。'}, {})
+    occurrence=generate(ai,task(ai,agent))
+    run=ai.data.run(occurrence['run_id'])
+    assert run['status']=='failed' and run['reply']=='我遇到点问题，未能完成该任务。'
+    assert not store.pending() and not occurrence['recipients']
+
+
 def test_shared_generation_never_reads_private_chat_profiles_or_memories(env):
     store, ai, _, agent, contacts, calls = env
     agent = edit_agent(ai, agent, prompt='PUBLIC_NEWS_STYLE_MARKER 使用简洁新闻风格，当前时间 {{current_time}}。')

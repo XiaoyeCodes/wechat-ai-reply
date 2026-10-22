@@ -75,9 +75,10 @@ def test_live_mode_does_not_expose_demo_injection(tmp_path):
 def test_hermes_binding_requires_explicit_contact_authorization(tmp_path):
     # Demo worker; no real WeChat or Hermes calls.
     with TestClient(create_app(tmp_path,demo=True)) as client:
+        wait_for(lambda:client.get('/api/status').json(),lambda s:s.get('account_id')=='demo-account')
         store=client.app.state.store
-        aria=store.add_contact({'lookup':'Aria','nickname':'Aria','wechat_id':'aria','account_id':'self'})
-        other=store.add_contact({'lookup':'另一位','nickname':'另一位','wechat_id':'other','account_id':'self'})
+        aria=store.add_contact({'lookup':'Aria','nickname':'Aria','wechat_id':'aria','account_id':'demo-account'})
+        other=store.add_contact({'lookup':'另一位','nickname':'另一位','wechat_id':'other','account_id':'demo-account'})
         body={'name':'Hermes 测试','kind':'hermes','url':'http://127.0.0.1:8123'}
         response=client.post('/api/ai/config/agents',headers=HEADERS,json=body)
         assert response.status_code==201

@@ -331,6 +331,7 @@ async function renderRun(run,target){
   if(run.status==='draft'&&editedDrafts.has(run.id)&&target==='ai-run-detail')$('ai-draft-text').value=editedDrafts.get(run.id);
   if(run.pdf){
     $(target).insertAdjacentHTML('afterbegin',`<p><a class="button secondary" href="${esc(run.pdf.url)}" target="_blank" rel="noopener">下载 PDF · ${esc(run.pdf.name)}</a></p>`);
+    if(run.pdf.preview_urls?.length)$(target).insertAdjacentHTML('beforeend',`<div class="pdf-previews">${run.pdf.preview_urls.map((url,i)=>`<a href="${esc(url)}" target="_blank" rel="noopener"><img src="${esc(url)}" alt="PDF 第 ${i+1} 页预览" loading="lazy"></a>`).join('')}</div>`);
     if(run.status==='draft')$(prefix).maxLength=16000;
   }
   const media=run.trace.filter(t=>t.step==='生成媒体').map(t=>t.detail);

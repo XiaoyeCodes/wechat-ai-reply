@@ -9,6 +9,44 @@ from PIL import Image, ImageDraw
 from wechat_panel.bridge import WeixinBridge, image_direction, clipped_text_direction
 
 
+def test_focus_tolerates_transiently_missing_foreground_window(monkeypatch):
+    obj=WeixinBridge.__new__(WeixinBridge)
+    state={'foreground':0}
+    monkeypatch.setattr(win32gui,'GetForegroundWindow',lambda:state['foreground'])
+    monkeypatch.setattr(win32gui,'IsIconic',lambda h:False)
+    def ancestor(handle,flag):
+        assert handle,'GetAncestor must not receive a missing foreground HWND'
+        return handle
+    monkeypatch.setattr(win32gui,'GetAncestor',ancestor)
+    monkeypatch.setattr(win32gui,'SetForegroundWindow',lambda h:state.update(foreground=h))
+    monkeypatch.setattr(module.time,'sleep',lambda _:None)
+    obj._focus(SimpleNamespace(handle=123),None)
+    assert state['foreground']==123
+
+
+@pytest.mark.parametrize('label',['微信号：','微信號:','WeChat ID: ','Weixin ID:'])
+def test_contact_identity_reads_mixed_language_labels_without_a_remark(label):
+    obj=WeixinBridge.__new__(WeixinBridge)
+    obj.account_id='current-login'
+    obj.Tools=SimpleNamespace(is_group_chat=lambda w:False)
+    obj.Labels=SimpleNamespace(Nickname='昵称：',Remark='备注',WxNum='微信号：')
+    obj.Buttons=SimpleNamespace(ChatInfoButton={'title':'聊天信息'})
+    obj._title=lambda w:'朋友'
+    obj._focus=obj._click=lambda *args:None
+    text=['朋友',label,'friend-account','备注','添加备注名']
+    popup=SimpleNamespace(wait=lambda *a,**kw:None,exists=lambda **kw:True,close=lambda:None,
+                          descendants=lambda **kw:[SimpleNamespace(window_text=lambda t=t:t) for t in text])
+    obj.desktop=SimpleNamespace(window=lambda **kw:popup)
+    head=SimpleNamespace(rectangle=lambda:(_ for _ in ()).throw(ValueError('No image in this fixture')))
+    member=SimpleNamespace(wait=lambda *a,**kw:None,child_window=lambda **kw:head)
+    info=SimpleNamespace(exists=lambda **kw:True,is_visible=lambda:True,wait=lambda *a,**kw:None,
+                         child_window=lambda **kw:member)
+    window=SimpleNamespace(child_window=lambda **kw:info,process_id=lambda:123)
+    profile=obj._read_profile(window,'朋友')
+    assert profile['lookup']=='朋友' and profile['wechat_id']=='friend-account'
+    assert profile['account_id']=='current-login'
+
+
 def test_click_waits_for_restored_control_bounds_without_clicking_other_window(monkeypatch):
     from pywinauto.win32structures import RECT
     obj=WeixinBridge.__new__(WeixinBridge)
@@ -363,12 +401,13 @@ def test_reconnect_does_not_restore_main_when_independent_connection_is_ready(mo
 def test_logged_in_subscription_page_is_ready_even_without_chat_input(monkeypatch):
     obj = WeixinBridge.__new__(WeixinBridge)
     obj.account_id, obj.account_hint = 'self', 'hint'
+    obj.account_name = 'My account'
     obj.Tools = SimpleNamespace(is_weixin_running=lambda:True, get_current_wxid=lambda:'hint',
                                get_weixin_version=lambda:'test')
     obj.Main = SimpleNamespace(Search={'class_name':'SearchEdit'})
     obj.Edits = SimpleNamespace(CurrentChatEdit={'auto_id':'chat_input_field'})
     obj.SideBar = SimpleNamespace(Weixin={'title':'微信'})
-    window = SimpleNamespace(handle=123, exists=lambda **kw:True, class_name=lambda:'mmui::MainWindow',
+    window = SimpleNamespace(handle=123, process_id=lambda:456, exists=lambda **kw:True, class_name=lambda:'mmui::MainWindow',
         descendants=lambda **kw:[], child_window=lambda **kw:SimpleNamespace(
             exists=lambda **opts:kw.get('title')=='微信'))
     obj._main_window = lambda:window
@@ -509,6 +548,7 @@ def test_narrow_window_connects_with_back_and_one_double_click(monkeypatch, hidd
 def test_contact_verification_opens_independent_window_before_reading_profile():
     obj = WeixinBridge.__new__(WeixinBridge)
     obj.account_hint, obj.account_id = 'hint', 'self'
+    obj._account_context = lambda:dict(hint='hint')
     obj.Tools = SimpleNamespace(get_current_wxid=lambda: 'hint')
     obj.profiles, obj.verified_contacts = {}, set()
     obj._find_dialog = lambda c: None

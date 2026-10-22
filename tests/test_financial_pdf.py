@@ -17,6 +17,14 @@ def test_only_explicit_pdf_output_triggers(text, expected):
     assert wants_pdf(text) == expected
 
 
+@pytest.mark.parametrize('text,expected',[
+    ('请以 PDF 格式发给我',True),('帮我导出PDF文件',True),('用PDF回复吧',True),
+    ('请分析黄金，以PDF格式发给我',False),('重新生成PDF',False),('PDF是什么',False)])
+def test_format_only_followup_does_not_match_new_topic(text,expected):
+    from wechat_panel.financial_pdf import format_only_request
+    assert format_only_request(text)==expected
+
+
 def test_report_preserves_tables_chinese_and_paginates(tmp_path):
     content = '# 中文研究标题\n\n## 数据比较\n\n| 标的 | 数值 | 解释 |\n|---|---:|---|\n'
     content += ''.join(f'| 样本{i} | {i}.25% | 有效数据与正文说明 |\n' for i in range(85))

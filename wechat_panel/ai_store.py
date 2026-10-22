@@ -89,7 +89,7 @@ class AIStore:
         from .skills import BUILTINS as SKILL_TOOLS
         BUILTINS=COMPANION_TOOLS+SKILL_TOOLS
         for name,description,properties,approval in BUILTINS:
-            if name in ('news_collect','generate_image'):
+            if name in ('news_collect','generate_image','financial_daily'):
                 parameters={'type':'object','properties':properties,'required':['prompt'] if name=='generate_image' else [],'additionalProperties':False}
                 existing=next((t for t in self.list('tools') if t.get('builtin')==name),None)
                 if not existing:
@@ -195,7 +195,7 @@ class AIStore:
             raise ValueError('该 MCP 连接仍有导入的工具，请先解除 Agent 绑定并删除这些工具')
         if kind=='providers' and any(s['embedding_provider_id']==rid for s in self.list('services')):
             raise ValueError('该模型正在被记忆服务用于 Embedding，请先修改服务连接')
-        if kind=='agents' and any(c.get('ai_agent_id')==rid for c in self.store.contacts()):
+        if kind=='agents' and any(c.get('ai_agent_id')==rid for c in self.store.contacts(all_accounts=True)):
             raise ValueError('该 Agent 已绑定联系人，请先切换联系人 Agent')
         for agent in self.list('agents'):
             linked={'providers':[agent['provider_id']],
@@ -282,7 +282,7 @@ class AIStore:
             self.store.event(db,'ai.run',cid,detail=reason)
 
     def cancel_all(self,reason):
-        for contact in self.store.contacts():self.cancel_contact(contact['id'],reason)
+        for contact in self.store.contacts(all_accounts=True):self.cancel_contact(contact['id'],reason)
         with self.store.connect() as db:
             db.execute("UPDATE ai_runs SET status='cancelled',error=?,updated_at=? WHERE dry_run=1 AND status IN ('pending','running','waiting_approval','draft')",(reason,now()))
             db.execute("UPDATE ai_runs SET status='cancelled',error=?,updated_at=? WHERE mode='agent_task' AND status IN ('pending','running','waiting_approval','draft')",(reason,now()))
@@ -299,6 +299,7 @@ class AIStore:
             return schedule_valid(self.store,run)
         try:contact=self.store.contact(run['contact_id'])
         except KeyError:return False
+        if not self.store.account_matches(contact):return False
         settings=self.settings()
         with self.store.connect() as db:
             from .conversation_turn import latest_id

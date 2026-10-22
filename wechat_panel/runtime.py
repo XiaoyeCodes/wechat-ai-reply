@@ -27,8 +27,10 @@ def _worker_main(commands, output, demo, instances, state_path=None):
     contacts, blocked, attached = {}, set(), set()
     listener_states = {}
     retry_due, retry_attempts = {}, {}
-    paused, last_health, last_poll, last_avatar = False, 0, 0, 0
+    paused, last_health, last_poll, last_avatar = send_store.paused() if send_store else False, 0, 0, 0
     health = dict(state='starting', detail='正在初始化微信连接', account_id=None)
+    identity_attempt = None
+    identity_error = ''
 
     def emit(kind, **data):
         output.put(dict(kind=kind, **data))
@@ -42,7 +44,9 @@ def _worker_main(commands, output, demo, instances, state_path=None):
         return False
 
     def probe(reveal=False):
-        nonlocal bridge, health
+        nonlocal bridge, health, identity_attempt, identity_error
+        previous_account = health.get('account_id')
+        previous_session = health.get('session_key')
         try:
             if bridge is None:
                 bridge = DemoBridge() if demo else WeixinBridge()
@@ -53,8 +57,30 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                      account_id=health.get('account_id'))
                 bridge.reveal()
                 health = bridge.health()
+            if health['state'] in ('offline','account_changed'):
+                identity_attempt = None
+            if (health['state'] in ('ready','account_changed') and not health.get('account_id')
+                    and hasattr(bridge,'identify') and (not paused or reveal)):
+                key = health.get('session_key', health['state'])
+                if reveal or identity_attempt != key:
+                    identity_attempt = key
+                    try:
+                        health = bridge.identify()
+                        identity_error = ''
+                    except Exception as exc:
+                        if hasattr(bridge,'_record'):
+                            bridge._record('connection.identity_failed',error=str(exc),trace=traceback.format_exc())
+                        identity_error = f'微信账号核验失败：{exc}。请在运行状态重新连接'
+                if identity_error:
+                    health = dict(state='unavailable', detail=identity_error, account_id=None)
         except Exception as exc:
             health = dict(state='unavailable', detail=str(exc), account_id=None)
+        if (previous_account != health.get('account_id')
+                or (previous_session and health.get('session_key') and previous_session != health['session_key'])):
+            attached.clear()
+            blocked.clear()
+            retry_due.clear()
+            retry_attempts.clear()
         emit('health', **health)
 
     def listening(contact):
@@ -65,6 +91,7 @@ def _worker_main(commands, output, demo, instances, state_path=None):
 
     def connect(contact, for_send=False):
         cid = contact['id']
+        if not account_matches(contact):raise RuntimeError('此会话属于其他微信账号，请切换到对应账号')
         if contact['listening']:
             listener_states.pop(cid, None)
             emit('listener', contact_id=cid, state='starting', detail='')
@@ -77,6 +104,9 @@ def _worker_main(commands, output, demo, instances, state_path=None):
             emit('snapshot', contact_id=cid, items=items)
             listening(contact)
         probe()
+
+    def account_matches(contact):
+        return not contact.get('account_id') or contact['account_id'] == health.get('account_id')
 
     def failed(contact, exc):
         cid = contact['id']
@@ -138,7 +168,7 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                 retry_attempts.clear()
                 last_poll = 0
                 last_avatar = 0
-                if not paused and any(c['listening'] for c in contacts.values()):
+                if not paused and (resuming or any(c['listening'] for c in contacts.values())):
                     # A minimized/tray-hidden main window with no open chats is
                     # recoverable. Wake it before the health gate on polling.
                     probe(reveal=True)
@@ -156,9 +186,7 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                         command.get('group_self_name',''),command.get('account_id'))
                     probe()
                 elif op == 'probe':
-                    if command.get('reveal'):
-                        bridge.reveal()
-                    probe()
+                    probe(reveal=command.get('reveal',False))
                     result = health
                 elif op == 'sync_avatars':
                     if paused or health['state'] != 'ready':
@@ -173,6 +201,8 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                     contact = contacts.get(command['contact_id'])
                     if contact is None:
                         raise RuntimeError('联系人已移除')
+                    probe()
+                    if not account_matches(contact):raise RuntimeError('此会话属于其他微信账号，请切换到对应账号')
                     if op == 'send':
                         if not ai_current(command):continue
                         if contact['mode'] not in ('manual','ai_assist','ai_auto'):
@@ -247,7 +277,7 @@ def _worker_main(commands, output, demo, instances, state_path=None):
         if stamp-last_poll >= 1 and bridge and health['state'] == 'ready' and not paused:
             last_poll = stamp
             for cid, contact in list(contacts.items()):
-                if not contact['listening'] or cid in blocked or stamp < retry_due.get(cid, 0):
+                if not contact['listening'] or not account_matches(contact) or cid in blocked or stamp < retry_due.get(cid, 0):
                     continue
                 try:
                     if cid not in attached:
@@ -291,6 +321,7 @@ class Runtime:
 
     def start(self):
         self.store.recover()
+        self.store.activate_account('')
         context = mp.get_context('spawn')
         self.commands, self.output = context.Queue(), context.Queue()
         self.process = context.Process(target=worker_main, args=(self.commands, self.output, self.demo, str(self.store.path)), daemon=True)
@@ -342,14 +373,18 @@ class Runtime:
                     if kind == 'health':
                         self.status = {k:v for k,v in event.items() if k != 'kind'}
                         self.status['checked_at'] = now()
+                        if self.store.activate_account(event.get('account_id'),event.get('account_name') or ''):
+                            self.configure()
                     elif kind == 'snapshot':
-                        self.store.ingest(event['contact_id'], event['items'])
+                        if self.store.account_matches(self.store.contact(event['contact_id'])):
+                            self.store.ingest(event['contact_id'], event['items'])
                     elif kind == 'avatars':
                         for item in event['images']:
                             self.store.set_avatar(item['account_id'], item['wechat_id'], item['data'])
                     elif kind == 'listener':
                         try:
-                            self.store.update_contact(event['contact_id'], listener_state=event['state'], error=event['detail'])
+                            if self.store.account_matches(self.store.contact(event['contact_id'])):
+                                self.store.update_contact(event['contact_id'], listener_state=event['state'], error=event['detail'])
                         except KeyError:
                             pass
                     elif kind == 'result':

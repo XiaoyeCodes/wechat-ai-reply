@@ -59,6 +59,8 @@ class Store:
                     contact_id TEXT, payload TEXT NOT NULL, created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS wechat_accounts (
+                    account_id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS voice_clones (
                     request_id TEXT PRIMARY KEY, scope TEXT NOT NULL, voice_id TEXT NOT NULL,
                     name TEXT NOT NULL, digest TEXT NOT NULL, status TEXT NOT NULL,
@@ -118,7 +120,51 @@ class Store:
         db.execute('INSERT INTO events(type, contact_id, payload, created_at) VALUES(?,?,?,?)',
                    (event_type, contact_id, json.dumps(payload, ensure_ascii=False), now()))
 
-    def contacts(self):
+    def active_account(self):
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE key='active_wechat_account'").fetchone()
+            # Stores used without a running WeChat connection retain their
+            # unscoped behavior (imports, migrations and isolated tests).
+            return row['value'] if row else None
+
+    def account_matches(self, contact):
+        active = self.active_account()
+        return active is None or bool(active and contact.get('account_id') == active)
+
+    def activate_account(self, account_id, name=''):
+        account_id = account_id or ''
+        with self.connect() as db:
+            prior = db.execute("SELECT value FROM settings WHERE key='active_wechat_account'").fetchone()
+            changed = prior is None or prior['value'] != account_id
+            if account_id:
+                db.execute('INSERT INTO wechat_accounts VALUES(?,?,?) ON CONFLICT(account_id) DO UPDATE SET '
+                           "name=CASE WHEN excluded.name!='' THEN excluded.name ELSE name END,last_seen_at=excluded.last_seen_at",
+                           (account_id, name, now()))
+            if not changed:return False
+            db.execute("INSERT OR REPLACE INTO settings VALUES('active_wechat_account',?)", (account_id,))
+            reason = '微信登录账号已变化，旧账号任务已取消'
+            db.execute("UPDATE contacts SET listener_state=CASE WHEN listening THEN 'inactive' ELSE 'idle' END,error='',"
+                       'ai_revision=ai_revision+1,ai_start_message=COALESCE((SELECT MAX(id) FROM messages WHERE contact_id=contacts.id),0) '
+                       'WHERE account_id!=?', (account_id,))
+            db.execute("UPDATE messages SET status='cancelled',error=? WHERE status='queued' AND contact_id IN "
+                       '(SELECT id FROM contacts WHERE account_id!=?)', (reason, account_id))
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name='ai_runs'").fetchone():
+                db.execute("DELETE FROM ai_inbox WHERE contact_id IN (SELECT id FROM contacts WHERE account_id!=?)", (account_id,))
+                db.execute("UPDATE ai_runs SET status='cancelled',error=?,updated_at=? WHERE contact_id IN "
+                           "(SELECT id FROM contacts WHERE account_id!=?) AND status IN ('pending','running','waiting_approval','draft','queued')",
+                           (reason, now(), account_id))
+                db.execute("UPDATE ai_approvals SET status='cancelled' WHERE run_id IN (SELECT id FROM ai_runs WHERE status='cancelled')")
+                db.execute("UPDATE hermes_confirmations SET status='cancelled' WHERE contact_id IN "
+                           "(SELECT id FROM contacts WHERE account_id!=?) AND status='pending'", (account_id,))
+            self.event(db, 'runtime.account', account_id=account_id, name=name)
+            return True
+
+    def accounts(self):
+        with self.connect() as db:
+            return [dict(row) for row in db.execute('SELECT * FROM wechat_accounts ORDER BY last_seen_at DESC')]
+
+    def contacts(self, all_accounts=False):
+        active = None if all_accounts else self.active_account()
         with self.connect() as db:
             rows = db.execute('''SELECT c.*, a.digest avatar_version, own.digest self_avatar_version,
                 (SELECT text FROM messages WHERE contact_id=c.id ORDER BY id DESC LIMIT 1) last_message,
@@ -126,7 +172,8 @@ class Store:
                 FROM contacts c
                 LEFT JOIN avatars a ON a.account_id=c.account_id AND a.wechat_id=c.wechat_id
                 LEFT JOIN avatars own ON own.account_id=c.account_id AND own.wechat_id=c.account_id
-                ORDER BY COALESCE(last_at,c.created_at) DESC''').fetchall()
+                WHERE (? IS NULL OR c.account_id=?)
+                ORDER BY COALESCE(last_at,c.created_at) DESC''', (active, active)).fetchall()
             return [self._contact_image_urls(dict(x)) for x in rows]
 
     @staticmethod
@@ -442,6 +489,7 @@ class Store:
                 self.event(db,'send.recovered',contact_id,message_id=row['id'],source_key=found['key'],detail='后台已核对新增本人消息，发送状态已自动恢复')
 
     def ai_send_valid(self, message):
+        if not self.account_matches(self.contact(message['contact_id'])):return False
         if message.get('origin')=='approval':
             from .hermes_confirmations import valid_notice
             return valid_notice(self,message)

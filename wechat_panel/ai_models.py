@@ -84,7 +84,7 @@ class Tool(Config):
     connection_id: str = Field(default='', max_length=100)
     remote_name: str = Field(default='', max_length=200)
     capability: Literal['general','amap','mindmap'] = 'general'
-    builtin: Literal['clock', 'calculator', 'knowledge_search','web_search','read_web','news_collect','weather',
+    builtin: Literal['clock', 'calculator', 'knowledge_search','web_search','read_web','news_collect','financial_daily','weather',
                      'music_search','places_search','movie_search','memory_search','remember','forget',
                      'set_reminder','generate_image','speak','use_skill','read_skill_file',
                      'platform_search','platform_read','platform_browse','platform_transcribe'] | None = None

@@ -1,0 +1,15 @@
+{
+  "name": "jin10-financial-daily",
+  "provenance": "Reviewed implementation from the user-imported skill package; Relay adapter fixes are maintained with this repository.",
+  "sha256": {
+    "scripts/fetch_latest.py": "988b6edc8468e3721e7c0c3eabb90c908293cfec4c694ad673fe30119105993f",
+    "scripts/fetch_markets.py": "11b1bd99a5bcc19917d400245cd1be0b5beca7d27e6121aee351ead529748ae3",
+    "scripts/record_delivery.py": "5d604887210d1e164fade5a09c3942e23d21f31a12ecdec5b82879c0931e993b",
+    "scripts/render_daily.py": "cd1656041530162bb26298011b436f4e3974906bbcafa9f299f2c2d421924d8a",
+    "scripts/run_daily.py": "c957f4a46ccb7c810fd33cd086f9a3a4a2de13e563a3236b8cf21d6af03fda74",
+    "scripts/test_markets.py": "fbe851355dcd66adeeb296e4d59f01874ab867cb7b4c729eeac85f2742cdf9b2",
+    "scripts/test_workflow.py": "cecc7c8b003d185a6fde2cdecf10277b735b28d3f52a7bc06d51b3a6ca4affb1",
+    "scripts/verify_report.py": "9393ea232df0c23be1b0ca56d257dd3b51ec468b6843ca16c5ff22d06cf8bfbd",
+    "scripts/workflow.py": "6492b37e34a5a515011490f10d1f3b96f1bf88fe656518424d02c5a923544f94"
+  }
+}

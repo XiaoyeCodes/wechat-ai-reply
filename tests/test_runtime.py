@@ -7,6 +7,59 @@ import pytest
 from wechat_panel import runtime
 
 
+def test_failed_identity_does_not_reopen_profile_until_manual_retry(monkeypatch):
+    attempts=[]
+    class Bridge:
+        def health(self):return dict(state='ready',account_id=None,session_key='same-login')
+        def identify(self):attempts.append('profile');raise RuntimeError('暂时无法读到资料')
+    monkeypatch.setattr(runtime,'WeixinBridge',Bridge)
+    commands,output=Queue(),Queue()
+    thread=Thread(target=runtime.worker_main,args=(commands,output,False),daemon=True);thread.start()
+    try:
+        receive(output,lambda e:e['kind']=='health' and e['state']=='unavailable')
+        for n in range(3):
+            commands.put(dict(op='probe',request_id=str(n)))
+            receive(output,lambda e:e['kind']=='result' and e['request_id']==str(n))
+        assert attempts==['profile']
+        commands.put(dict(op='probe',request_id='manual',reveal=True))
+        receive(output,lambda e:e['kind']=='result' and e['request_id']=='manual')
+        assert attempts==['profile','profile']
+    finally:
+        commands.put(dict(op='stop'));thread.join(timeout=2)
+        assert not thread.is_alive()
+
+
+def test_identity_is_loaded_without_contacts_and_switching_rebinds_only_matching_chats(monkeypatch):
+    instances=[];actions=[]
+    class Bridge:
+        def __init__(self):self.login='first';self.verified=None;instances.append(self)
+        def health(self):
+            return dict(state='ready',account_id=self.verified if self.verified==self.login else None,session_key=self.login)
+        def identify(self):self.verified=self.login;actions.append(('identify',self.login));return self.health()
+        def attach(self,c,for_send=False):actions.append(('attach',c['account_id']));return []
+        def snapshot(self,c):assert c['account_id']==self.login;return []
+    monkeypatch.setattr(runtime,'WeixinBridge',Bridge)
+    commands,output=Queue(),Queue()
+    thread=Thread(target=runtime.worker_main,args=(commands,output,False),daemon=True)
+    thread.start()
+    try:
+        receive(output,lambda e:e['kind']=='health' and e.get('account_id')=='first')
+        assert actions==[('identify','first')]
+        contacts=[dict(id=a,account_id=a,listening=True,mode='manual') for a in ('first','second')]
+        commands.put(dict(op='configure',contacts=contacts,paused=False))
+        receive(output,lambda e:e['kind']=='listener' and e.get('contact_id')=='first' and e['state']=='listening')
+        for account in ('second','first'):
+            instances[0].login=account
+            commands.put(dict(op='probe',request_id=account,reveal=True))
+            receive(output,lambda e:e['kind']=='result' and e['request_id']==account)
+            commands.put(dict(op='configure',contacts=contacts,paused=False))
+            receive(output,lambda e:e['kind']=='listener' and e.get('contact_id')==account and e['state']=='listening')
+        assert [a for a in actions if a[0]=='attach']==[('attach','first'),('attach','second'),('attach','first')]
+    finally:
+        commands.put(dict(op='stop'));thread.join(timeout=2)
+        assert not thread.is_alive()
+
+
 def receive(output, predicate):
     deadline = time.monotonic()+5
     while time.monotonic() < deadline:

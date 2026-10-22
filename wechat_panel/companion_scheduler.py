@@ -20,6 +20,7 @@ def quiet(c,stamp):
 def schedule_valid(store,run):
     try:
         contact=store.contact(run['contact_id'])
+        if not store.account_matches(contact):return False
         with store.connect() as db:
             record=db.execute('SELECT data FROM companion_schedules WHERE id=?',(run['schedule_id'],)).fetchone()
             if not record:return False
@@ -61,7 +62,8 @@ class CareScheduler:
                 config=companion_config(agent);care=config['care']
                 scope=self.ai.companion.memory.scope(s['agent_id'],c['id'])
                 profile=self.ai.companion.memory.profile(scope,s['agent_id'],c['id'])['data']
-                if (stamp-due).total_seconds()>300:status='已跳过过期日程，避免重启后集中打扰'
+                if not self.ai.store.account_matches(c):status='已跳过：当前登录的是其他微信账号'
+                elif (stamp-due).total_seconds()>300:status='已跳过过期日程，避免重启后集中打扰'
                 elif self.ai.store.paused() or not self.ai.data.settings()['enabled']:status='已跳过：全部运行或 AI 已暂停'
                 elif not agent['enabled'] or not care['enabled'] or not profile['care_consent']:status='已跳过：未开启该联系人的主动关怀'
                 elif not c['listening'] or c['ai_agent_id']!=s['agent_id'] or c['mode'] not in ('ai_auto','ai_assist'):status='已跳过：联系人未启用对应 Agent'

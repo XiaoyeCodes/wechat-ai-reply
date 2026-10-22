@@ -125,6 +125,9 @@ class Services:
                 raise RuntimeError(f'DeepSeek {operation}：{reason}'+(f'（HTTP {code}）' if code else '')) from None
 
     def fetch(self,sid,url):
+        from .news_cards import read_source
+        original=read_source(url)
+        if original is not None:return json.dumps(original,ensure_ascii=False)
         # Keep transcript/platform readers for media links; Search/Fetch is
         # the generic article reader, not a substitute for video subtitles.
         from .platform_reader import platform_for_url

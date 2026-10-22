@@ -111,9 +111,9 @@ def test_failed_search_never_sends_false_success(setup,monkeypatch,failure):
     monkeypatch.setattr(ai.companion,'tool',query)
     ai.model_call=lambda *a:({'role':'assistant','content':'我搜了一圈，查到了，答案就是健身理论。'}, {})
     r=run(ai,agent(),'最近大水理论是什么？')
-    assert r['status']=='completed' and len(calls)==1
+    assert r['status']=='failed' and len(calls)==1
     assert '健身理论' not in r['reply'] and '查到了' not in r['reply']
-    assert ('服务暂时不可用' if failure=='error' else '匹配来源') in r['reply']
+    assert r['reply']=='我遇到点问题，未能完成该任务。'
 
 
 @pytest.mark.parametrize('policy,text',[('off','今天有哪些新闻'),('auto','不要联网，今天有哪些新闻')])
@@ -125,7 +125,7 @@ def test_disabled_lookup_cannot_be_executed_as_fixed_tool(setup,policy,text):
     ai.model_call=model
     a=agent(web_policy=policy,steps=[{'type':'tool','tool_id':tool['id'],'arguments':{'query':'新闻'}},{'type':'model'},{'type':'reply'}])
     r=run(ai,a,text)
-    assert r['status']=='completed' and not calls and '没有进行联网查证' in r['reply']
+    assert r['status']=='failed' and not calls and r['reply']=='我遇到点问题，未能完成该任务。'
 
 
 @pytest.mark.parametrize('repair',[False,True])

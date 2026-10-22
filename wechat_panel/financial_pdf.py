@@ -17,6 +17,13 @@ def wants_pdf(text):
     return False
 
 
+def format_only_request(text):
+    """An output-format follow-up reuses the same conversation's last answer."""
+    return bool(re.fullmatch(r'(?:请|帮我)?\s*(?:(?:以|用)\s*PDF\s*(?:格式)?\s*(?:发给我|发送给我|给我|输出|交付|回复)'
+                             r'|(?:导出|转成|转换成|做成|保存为)\s*PDF\s*(?:文件|文档)?(?:发给我|给我)?)'
+                             r'[吧呀。！!\s]*',text.strip(),re.I))
+
+
 def report_path(data_dir, run_id):
     import uuid
     safe = str(uuid.UUID(run_id))

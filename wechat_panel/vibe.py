@@ -243,6 +243,8 @@ class VibeService:
                 api_key=unprotect(provider.get('secret', '')),
                 provider='deepseek' if urlsplit(provider['base_url']).hostname == 'api.deepseek.com' else 'openai')
         message = run['input']
+        from .failure_replies import instruction as failure_instruction
+        message += failure_instruction()
         if state.get('output_format') == 'pdf':
             message += '\n\n本次交付为 PDF，系统将负责排版与发送。请直接返回完整研究正文，使用清晰标题、段落及适当的 Markdown 数据表格，保留数据来源；不要自行生成文件或返回文件路径。'
         result = self.worker(dict(action='run', engine=agent.get('vibe_engine', 'github'), native_model=native_model,

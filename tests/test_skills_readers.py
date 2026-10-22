@@ -44,8 +44,8 @@ def test_query_failure_can_be_explained_instead_of_dropping_reply(tmp_path,monke
         def fail(*a):raise ReadUnavailable('HTTP 401：网页不可读取')
         monkeypatch.setattr(ai.companion.services,'read_web',fail)
         r=ai.create_run(a['id'],'读这个网页',dry_run=True);ai.execute(r['id'])
-        assert ai.data.run(r['id'])['status']=='completed'
-        assert '正文' in ai.data.run(r['id'])['reply']
+        assert ai.data.run(r['id'])['status']=='failed'
+        assert ai.data.run(r['id'])['reply']=='我遇到点问题，未能完成该任务。'
     finally:ai.stop()
 
 

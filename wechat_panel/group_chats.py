@@ -56,7 +56,16 @@ def request_text(contact, text):
     """Remove only the verified own mention when interpreting a chat command."""
     own=contact.get('group_self_name','')
     if not own or not contact.get('group_self_name_verified'):return text
-    return re.sub(r'(?<![\w@])@'+re.escape(own)+r'(?=$|[\s\u2005\u2009\u200b，。！？、,:;!?：；])','',text).strip()
+    return re.sub(mention_pattern(own),'',text).strip()
+
+
+def mention_pattern(own):
+    name = re.escape(own)
+    # Native mentions can follow the preceding word with no space, e.g.
+    # "回复OK@Aria\u2005". WeChat's dedicated trailing separator still
+    # distinguishes that case from email/name fragments and a doubled @.
+    return (r'(?:(?<![\w@])@'+name+r'(?=$|[\s\u2005\u2009\u200b，。！？、,:;!?：；])'
+            r'|(?<!@)@'+name+r'(?=[\u2005\u2009]))')
 
 
 def context(ai, contact, agent, trigger_id, sender, forget_before=0, exclude_ids=()):

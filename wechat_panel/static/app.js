@@ -25,7 +25,7 @@ document.querySelectorAll('[data-icon]').forEach(el => {el.innerHTML = icon(el.d
 const state = {contacts:[], status:{state:'starting'}, selected:null, messages:[], view:'chat', filter:'all',
   drafts:new Map(), sendKeys:new Map(), sending:new Set(), fingerprint:'', stream:null, deleteId:null,
   syncing:false, syncAgain:false, streamConnected:false, olderAvailable:false, mobileList:false};
-const listenerLabels = {idle:'未开启监听', starting:'正在建立监听', reconnecting:'正在自动重新连接', listening:'正在监听新消息', background:'后台监听中 · 发送时自动还原', error:'监听已中断'};
+const listenerLabels = {idle:'未开启监听', inactive:'等待登录对应微信账号', starting:'正在建立监听', reconnecting:'正在自动重新连接', listening:'正在监听新消息', background:'后台监听中 · 发送时自动还原', error:'监听已中断'};
 const listenerText = c => state.status.paused?'全部运行已暂停':c.listening&&state.status.state!=='ready'?(['starting','hidden'].includes(state.status.state)?'正在自动恢复微信连接':'微信连接未就绪'):listenerLabels[c.listener_state];
 const messageLabels = {queued:'等待发送', sending:'正在发送', confirmed:'已核对', uncertain:'待核对', failed:'发送失败', cancelled:'已取消'};
 const modeLabels = {manual:'人工聊天',listen_only:'仅监听',ai_assist:'AI 辅助回复',ai_auto:'AI 自动回复'};
@@ -78,6 +78,9 @@ function renderHeader() {
   const s=state.status, ready=s.state==='ready'&&!s.paused;
   const complete=!s.contacts_total||s.contacts_connected===s.contacts_total;
   $('demo-label').hidden=!s.demo;
+  $('current-account').hidden=!s.account_id;
+  $('current-account').textContent=s.account_name||s.account_id||'';
+  $('current-account').title=s.account_id?`当前微信账号：${s.account_id} · 会话按账号保存`:'';
   $('connection-button').classList.toggle('ready',ready&&complete);
   $('connection-button').classList.toggle('warning',!ready||!complete);
   $('connection-text').textContent=s.demo?'演示连接':s.paused?'全部已暂停':ready?(complete?'微信已连接':`${s.contacts_errors?'部分会话未连接':'正在连接会话'} ${s.contacts_connected}/${s.contacts_total}`):['starting','hidden'].includes(s.state)?'正在连接微信':'微信未就绪';
@@ -279,7 +282,10 @@ function sync() {
         state.syncAgain=false;
         try {
           const data=await api('/api/bootstrap');state.contacts=data.contacts;state.status=data.status;
-          if(state.selected&&!current()){state.selected=null;state.messages=[];state.fingerprint='';}
+          if(state.selected&&!current()){state.drafts.set(state.selected,$('message-input').value);state.selected=null;state.messages=[];state.fingerprint='';$('message-input').value='';}
+          if(!state.contacts.length){
+            $('chat-empty').querySelector('p').textContent=state.status.account_id?'当前微信账号尚未添加会话。可添加私聊或群聊；登录其他已保存账号时会自动加载对应列表。':'登录桌面微信后会自动识别账号并加载会话。';
+          }
           if(!state.selected&&state.contacts.length){state.selected=state.contacts[0].id;$('message-input').value=state.drafts.get(state.selected)||'';}
           $('view-chat').classList.toggle('mobile-list',state.mobileList||!state.selected);
           render();if(state.selected)await loadMessages(state.selected);
@@ -300,7 +306,7 @@ function connectStream(cursor) {
     if(events.some(e=>e.type.startsWith('ai.')||e.type==='contact.updated'))scheduleAIRefresh();
     scheduleSync();
   });
-  stream.addEventListener('status',e=>{state.status=JSON.parse(e.data);renderHeader();renderDetails();});
+  stream.addEventListener('status',e=>{const next=JSON.parse(e.data);if(next.account_id!==state.status.account_id)scheduleSync();state.status=next;renderHeader();renderDetails();});
   stream.onerror=()=>{state.streamConnected=false;renderHeader();};
 }
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')sync();});
