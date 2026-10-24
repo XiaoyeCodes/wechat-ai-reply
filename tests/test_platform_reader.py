@@ -196,3 +196,16 @@ def test_enable_script_preserves_memory_and_existing_configuration(tmp_path):
         assert ai.companion.memory.list_memories(scope)[0]['content']=='猫叫团子'
         assert ai.store.contact(contact['id'])['ai_context_start_message']==boundary
     finally:ai.stop()
+
+
+@pytest.mark.parametrize('data',[{'status':'error','message':'Login required'},
+    {'status':'blocked','content':'Please sign in'},[{'ok':False,'content':'Authentication required'}],'   '])
+def test_failure_envelopes_are_not_successful_content(data):
+    from wechat_panel.web_reader import ReadUnavailable
+    with pytest.raises(ReadUnavailable):reader.require_content(data)
+
+
+def test_transcript_ignores_failure_envelopes_but_preserves_real_segments():
+    assert reader.transcript_text([{'status':'error','content':'Login required'}])==''
+    assert reader.transcript_text([{'error':'blocked','content':'Please verify'},
+        {'text':'This speaker explains CAPTCHA and access denied errors.'}])=='This speaker explains CAPTCHA and access denied errors.'

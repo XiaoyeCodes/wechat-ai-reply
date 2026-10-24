@@ -6,7 +6,7 @@ from .web_policy import ONLINE
 
 MERGE_SECONDS = 600
 IMAGE_WAIT_SECONDS = 20
-READ_ONLY = ONLINE | {'clock','calculator','knowledge_search','memory_search','use_skill','read_skill_file'}
+READ_ONLY = ONLINE | {'clock','calculator','knowledge_search','memory_search','use_skill','read_skill_file','search_capabilities'}
 
 
 def latest_id(db,cid,agent,ready_only=False,group_sender=None):
@@ -52,7 +52,7 @@ def unanswered(ai,contact,trigger,forget_before=0):
         if row['trigger_id']<=boundary:continue
         old=ai.data.decode_state(row['state'])
         if group and old.get('group_sender')!=trigger['sender']:continue
-        if old.get('effect_started'):boundary=max(boundary,row['trigger_id'])
+        if old.get('effect_started') or old.get('conversation_queue'):boundary=max(boundary,row['trigger_id'])
     cutoff=stamp(trigger['created_at'])-timedelta(seconds=MERGE_SECONDS)
     return [m for m in ai.store.messages(contact['id'],before=None if group else trigger['id']+1,limit=200)
             if m['id']>boundary and not m['historical'] and m['direction']=='incoming'
@@ -72,11 +72,13 @@ def prepare(ai,contact,trigger,state,forget_before=0):
     quoted_images=prepare_quotes(contact,rows,state)
     media=agent.get('companion',{}).get('media',{})
     boundary=max(contact.get('ai_context_start_message',0),forget_before)
+    state['forget_before']=forget_before
     current=[m for m in rows if m['kind']=='image']
     recent=[]
     if media.get('understand_images') or media.get('image_service_id'):
         from .group_chats import is_group
-        recent=[m for m in ai.store.messages(contact['id'],before=trigger['id']+1,limit=200 if is_group(contact) else 40)
+        history=ai.store.messages(contact['id'],before=trigger['id']+1,limit=200 if is_group(contact) else 40)
+        recent=[m for m in history
                 if m['id']>boundary and m['kind']=='image' and m['direction']=='incoming'
                 and m['id'] not in state['turn_message_ids']]
         if is_group(contact):recent=[m for m in recent if not m.get('historical') and m.get('sender_verified') and m['sender']==trigger['sender']]
@@ -84,6 +86,14 @@ def prepare(ai,contact,trigger,state,forget_before=0):
     chosen=(current+recent)[:8]
     state['input_images']=[{'message_id':m['id'],'media_id':m.get('media_id',''),
                             'media_scope':'wechat:'+contact['id'],'current':m in current} for m in chosen]
+    if media.get('understand_images') or media.get('image_service_id'):
+        from .image_generation import sent_reference
+        generated=[ref for message in history if message['id']>boundary
+                   if (ref:=sent_reference(ai,contact,message,state))]
+        current_refs=[ref for ref in state['input_images'] if ref['current']]
+        recent_refs=[ref for ref in state['input_images'] if not ref['current']]+generated
+        recent_refs.sort(key=lambda ref:ref['message_id'])
+        state['input_images']=(current_refs+recent_refs[-4:])[:8]
     if state['quoted_messages']:
         state['input_images']=quoted_images
     elif media.get('understand_images') or media.get('image_service_id'):
@@ -93,6 +103,13 @@ def prepare(ai,contact,trigger,state,forget_before=0):
             and m.get('quote',{}).get('kind')=='image'
             and (not is_group(contact) or m.get('sender_verified') and m['sender']==trigger['sender'])][-4:]
         state['input_images']+= [image_ref(contact,m,False) for m in quoted_recent]
+    if not state['quoted_messages']:
+        # Historical quotes are recent context, not an explicit target for this
+        # turn; they must not override a newer image the assistant just sent.
+        current_refs=[ref for ref in state['input_images'] if ref['current']]
+        recent_refs=[ref for ref in state['input_images'] if not ref['current']]
+        recent_refs.sort(key=lambda ref:ref.get('quote_message_id') or ref.get('message_id',0))
+        state['input_images']=current_refs+recent_refs[-4:]
     state['input_images']=state['input_images'][:8]
     state['omitted_images']=max(0,len(current)-len(chosen))
     if len(rows)==1:return trigger['text']

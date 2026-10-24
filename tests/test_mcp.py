@@ -145,7 +145,7 @@ def test_uncalled_result_cannot_claim_weather(ai):
     t=tool(ai);a=setup_agent(ai,t);count=[]
     def model(*args):count.append(1);return {'role':'assistant','content':'上海今天晴，20度。'},{}
     ai.model_call=model;r=ai.create_run(a['id'],'上海天气',dry_run=True);ai.execute(r['id']);r=ai.data.run(r['id'])
-    assert r['status']=='completed' and len(count)==2 and '20度' not in r['reply']
+    assert r['status']=='failed' and len(count)==2 and r['reply']=='我遇到点问题，未能完成该任务。'
 
 
 def test_clarifies_missing_location_without_any_query(ai,monkeypatch):

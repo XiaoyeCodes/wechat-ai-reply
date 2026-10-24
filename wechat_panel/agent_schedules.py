@@ -264,7 +264,8 @@ class AgentScheduler:
                 db.execute('UPDATE agent_schedule_occurrences SET targets=? WHERE id=?',
                     (protect(json.dumps([{'id':c['id'], 'revision':c['ai_delivery_revision']} for c in targets])), oid))
             task = {'schedule_id':value['id'], 'occurrence_id':oid, 'revision':row['revision'], 'role':'generation',
-                    'timezone':value['timezone'], 'expires_at':(stamp + timedelta(hours=1)).isoformat()}
+                    'timezone':value['timezone'], 'expires_at':(stamp + timedelta(hours=1)).isoformat(),
+                    'request_text':value['instruction']}
             instruction = ('这是预先配置的 Agent 公共定时任务。本次在独立上下文执行，结果将共享给符合条件的联系人。'
                 '不引用任何联系人的身份、资料、历史和记忆。不要声称内容已经送达，投递由系统在生成完成后核对。\n'
                 '任务：' + value['instruction'])
@@ -304,6 +305,8 @@ class AgentScheduler:
                 state = {'snapshot':run['state']['snapshot'], 'scope':run['state']['scope'],
                     'context':[], 'artifacts':run['state'].get('artifacts', []),
                     'agent_schedule':task | {'role':'delivery'}, 'session_id':run['state']['session_id']}
+                if run['state'].get('task_plan'):
+                    state['task_plan']=json.loads(json.dumps(run['state']['task_plan']))
                 with self.store.connect() as db:
                     db.execute('BEGIN IMMEDIATE')
                     if db.execute('SELECT 1 FROM agent_schedule_recipients WHERE occurrence_id=? AND contact_id=?', (oid, contact['id'])).fetchone():continue
@@ -320,8 +323,17 @@ class AgentScheduler:
                         from .financial_daily import clone_artifact
                         state.update(clone_artifact(self.store.path.parent,run,delivery_id))
                         self.ai.data.update_run(delivery_id,state=state)
-                        self.ai._enqueue_pdf(self.ai.data.run(delivery_id))
-                    elif image_ids:self.store.enqueue_ai_images(contact['id'], delivery_id, image_ids)
+                        self.ai._enqueue_result(self.ai.data.run(delivery_id),reply,image_ids,True)
+                    elif state.get('task_plan') and run['state'].get('output_format')=='pdf' and run['state'].get('pdf'):
+                        from .financial_pdf import report_path
+                        source=report_path(self.store.path.parent,rid)
+                        if not source.read_bytes().startswith(b'%PDF-'):raise ValueError('共享PDF尚未生成')
+                        destination=report_path(self.store.path.parent,delivery_id)
+                        destination.parent.mkdir(parents=True,exist_ok=True);destination.write_bytes(source.read_bytes())
+                        state.update(output_format='pdf',pdf={**run['state']['pdf'],'url':f'/api/ai/runs/{delivery_id}/pdf'})
+                        self.ai.data.update_run(delivery_id,state=state)
+                        self.ai._enqueue_result(self.ai.data.run(delivery_id),reply,image_ids,True)
+                    elif image_ids:self.ai._enqueue_result(self.ai.data.run(delivery_id),reply,image_ids,False)
                     else:self.store.enqueue_ai_reply(contact['id'], reply, delivery_id)
                     with self.store.connect() as db:
                         db.execute("UPDATE agent_schedule_recipients SET status='queued',updated_at=? WHERE run_id=?", (now(), delivery_id))

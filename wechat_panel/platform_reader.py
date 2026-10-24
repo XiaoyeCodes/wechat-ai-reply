@@ -72,11 +72,19 @@ def fetch(url, limit=2_000_000):
     raise ReadUnavailable('来源跳转次数过多')
 
 
+def failed_payload(data):
+    return isinstance(data,dict) and bool(data.get('ok') is False or data.get('success') is False
+        or data.get('error') or data.get('isError')
+        or str(data.get('status','')).casefold() in {'error','failed','failure','blocked','unauthenticated','not_logged_in'})
+
+
 def require_content(data):
-    if data is None or data == '' or data == [] or data == {}:
+    if data is None or data == '' or data == [] or data == {} or isinstance(data,str) and not data.strip():
         raise ReadUnavailable('平台未返回内容；可能无结果、未登录或连接不可用')
+    if isinstance(data,list) and all(failed_payload(item) for item in data):
+        raise ReadUnavailable('平台读取未成功，请检查浏览器连接、登录和平台限制')
     if isinstance(data, dict):
-        if data.get('ok') is False or data.get('success') is False or data.get('error') or data.get('isError'):
+        if failed_payload(data):
             raise ReadUnavailable('平台读取未成功，请检查浏览器连接、登录和平台限制')
         for key in ('data', 'results', 'items', 'entries'):
             if key in data and data[key] in (None, [], {}, ''):
@@ -90,6 +98,7 @@ def transcript_text(data):
     if isinstance(data, list):
         return '\n'.join(filter(None, (transcript_text(x) for x in data)))[:30000]
     if isinstance(data, dict):
+        if failed_payload(data):return ''
         for key in ('transcript', 'text', 'content', 'segments', 'subtitles'):
             if key in data:
                 text = transcript_text(data[key])

@@ -23,8 +23,8 @@ def send_image(bridge, contact, data, before_send=None):
     import pyautogui
     import win32gui
     from PIL import Image
-    from pyweixin import SystemSettings
-    from .bridge import BridgeError, SendUncertain
+    from .wechat_clipboard import copy_files
+    from .bridge import BridgeError, SendUncertain, DesktopBusy, connection_error
     from .wechat_draft import ChatDraft, clipboard_read, clipboard_write
     from .voice_reply import ReplySuperseded
 
@@ -54,12 +54,20 @@ def send_image(bridge, contact, data, before_send=None):
                 if bridge._title(window) != contact['lookup']:
                     raise SendUncertain('图片发送前聊天窗口发生变化，未点击发送')
                 if win32gui.GetAncestor(win32gui.GetForegroundWindow(), 2) != target.handle:
-                    raise SendUncertain('图片发送前焦点发生变化，未点击发送')
+                    error=SendUncertain if pasted else DesktopBusy
+                    raise error('图片发送前焦点发生变化，未点击发送')
                 if before_send:before_send()
+
+            def receipt():
+                try:return match_image(baseline,bridge.snapshot(contact))
+                except Exception as exc:
+                    if not connection_error(exc):raise
+                    bridge._record('send.receipt.read_retry',contact,kind='image',error=type(exc).__name__)
+                    return None
 
             verify(window)
             if edit.window_text():raise BridgeError('图片粘贴前输入框发生变化')
-            SystemSettings.copy_files_to_clipboard(filepaths_list=[str(path)])
+            copy_files(filepaths_list=[str(path)])
             verify(window)
             # Some builds send on paste. Persist intent before any possible send.
             if observer:observer('attempted')
@@ -67,15 +75,20 @@ def send_image(bridge, contact, data, before_send=None):
             pyautogui.hotkey('ctrl', 'v', _pause=False)
             time.sleep(.5)
             target, send_button = window, button
+            controls=[];candidates=[window]
             for _ in range(20):
                 # Weixin 4.1 inserts a single rich image object into the empty
                 # editor, without exposing its filename through UI Automation.
-                if edit.window_text() == '\ufffc' and button.is_enabled():
-                    break
-                receipt = match_image(baseline, bridge.snapshot(contact))
-                if receipt:
+                try:
+                    inline_ready=edit.window_text()=='\ufffc' and button.is_enabled()
+                except Exception as exc:
+                    if not connection_error(exc):raise
+                    inline_ready=False
+                if inline_ready:break
+                found_receipt=receipt()
+                if found_receipt:
                     confirmed = True
-                    return receipt['key']
+                    return found_receipt['key']
                 candidates = [window]
                 try:
                     candidates += [w for w in bridge.desktop.windows(process=window.process_id())
@@ -83,7 +96,10 @@ def send_image(bridge, contact, data, before_send=None):
                 except AttributeError:pass
                 found = False
                 for candidate in candidates:
-                    controls = candidate.descendants()
+                    try:controls=candidate.descendants()
+                    except Exception as exc:
+                        if not connection_error(exc):raise
+                        continue
                     # The unique clipboard path/name must appear in the preview,
                     # not merely a generic enabled chat Send button.
                     preview = any(path.name in c.window_text() for c in controls)
@@ -103,13 +119,15 @@ def send_image(bridge, contact, data, before_send=None):
             verify(target)
             attempted = True
             bridge._click(send_button, contact, 'ui.image.send_once')
-            for _ in range(40):
+            deadline=time.monotonic()+12
+            for _ in range(48):
                 time.sleep(.25)
-                receipt = match_image(baseline, bridge.snapshot(contact))
-                if receipt:
+                found_receipt=receipt()
+                if found_receipt:
                     confirmed = True
-                    bridge._record('send.image.confirmed', contact, source_key=receipt['key'])
-                    return receipt['key']
+                    bridge._record('send.image.confirmed', contact, source_key=found_receipt['key'])
+                    return found_receipt['key']
+                if time.monotonic()>=deadline:break
             raise SendUncertain('已尝试发送图片，但未核对到新增的本人图片消息，请在微信确认；不会自动重发')
     except (SendUncertain, ReplySuperseded):
         raise

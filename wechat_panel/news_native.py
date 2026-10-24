@@ -169,6 +169,11 @@ def prepare(ai,run,state):
 
 def prompt(run,state):
     if not state.get('native_news'):return ''
+    from .web_policy import SOURCE_REQUEST, NO_SOURCES
+    requested_only=state['snapshot']['agent'].get('source_policy')=='requested'
+    show_links=not NO_SOURCES.search(run['input']) and (not requested_only or SOURCE_REQUEST.search(run['input']))
+    link_rule=('保留各条来源、时间和原文链接。' if show_links else
+        '当前回复不展示原文、参考链接、裸网址或带链接的新闻标题，标题使用普通文字；来源名称和时间可保留。此规则优先于技能模板中默认附链接的要求。')
     return ('\n# 本轮原生新闻技能\n'+state['native_news']['instructions']+
         '\n# 工作台执行入口\n'
         'fetch_news.py --source/--keyword/--limit/--deep 对应 news_collect 的 source/keyword/limit/deep 参数；'
@@ -177,7 +182,7 @@ def prompt(run,state):
         'limit 是候选条数，不是独立事件数；为用户需要的条数预留候选余量。'
         '同一事件的不同语言、不同媒体、不同标题合并成一条。去重后不足时可继续从原生其它相关来源补采，不要把同一事件凑成多条，也不必让用户再次授权正常检索。'
         '菜单通过 read_skill_file 读取 templates.md，无需采集新闻。普通聊天不执行新闻脚本。'
-        '已取得 data 后按原生模板汇总，默认保留各条来源、时间和原文链接。用户的条数和主题要求优先于模板数量。'
+        '已取得 data 后按原生模板汇总。'+link_rule+'用户的条数和主题要求优先于模板数量。'
         '用户明确要北京时间今天时依据实际日期筛选；只有 Today/Hot/Real-time 或时间未知不能证明今天发布，需标明或补读。'
         '工具 time_hints 将带时区的原始时间换算为北京时间，按其日期筛选和显示；前一天的 UTC 时间可能是北京时间今天。'
         '这是来源条目时间，可能是更新时间；不要误写成事件发生时间或首次发布时间。'
@@ -200,6 +205,9 @@ def finish(ai,run,state,reply):
         reply='本轮未能执行原生新闻采集，暂时无法给出可靠简报，请检查新闻工具是否已授权。'
     elif receipts and not any(r['items'] for r in receipts):
         reply='本次原生新闻采集没有返回可用条目，暂时无法汇总。可以换一个来源或稍后再试。'
+    from .web_policy import source_reason
+    if state['snapshot']['agent'].get('source_policy')=='requested' and not source_reason(run,state,reply):
+        reply=re.sub(r'\n\s*(?:参考(?:来源|链接|资料)?|来源|出处|原文)[：:].*https?://.*\Z','',reply,flags=re.S).rstrip()
     rid=str(uuid.UUID(run['id']))
     path=report_dir(ai.store.path.parent,run)/('news_'+rid+'_report.md')
     path.write_text(reply,encoding='utf-8')

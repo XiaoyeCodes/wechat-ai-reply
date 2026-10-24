@@ -17,6 +17,8 @@ CLAIM=re.compile(r'(?:我)?(?:搜|查)(?:了一圈|了一下|了下|到了|过�
 UNCERTAIN=re.compile(r'不(?:知道|清楚|确定|了解)|没(?:听过|法确认)|无法确认|拿不准')
 SOURCE_REQUEST=re.compile(r'(?:给|发|附|带|提供|标注|列出|保留|贴).{0,8}(?:来源|出处|链接|网址|原文)|(?:来源|出处|链接|网址)(?:呢|在哪|是什么|给我)|哪里(?:看到|查到)|source|citation',re.I)
 NO_SOURCES=re.compile(r'(?:不要|不用|别|无需).{0,4}(?:附|带|给|贴|提供)?(?:来源|出处|链接|网址|参考)')
+LOCAL_REQUEST=re.compile(r'记忆|知识库|本地(?:文档|资料)|偏好|喜好|保存的?(?:记录|信息)|我的(?:档案|名字|生日)|我.{0,10}喜欢')
+EXTERNAL_LOCAL_MIX=re.compile(r'https?://|联网|上网|网上|外网|天气|气温|新闻|热搜|热榜|汇率|股价|行情|总统|首相|CEO',re.I)
 
 
 def conversation_only(text):
@@ -29,6 +31,38 @@ def conversation_only(text):
     identity=re.compile(r'(?:你|您).{0,12}(?:是不是|是|算是).{0,8}(?:AI|人工智能|机器人|真人|人类|程序)|(?:你|您).{0,8}(?:是谁|叫什么|名字|身份|人设)|(?:你|您).{0,14}(?:搜|查|联网).{0,8}(?:什么|干什么|了吗|了没有|吗|呢)|(?:不用|不需要|别).{0,5}(?:搜|查|联网)',re.I)
     followup=re.compile(r'^(?:这|那|刚才说的)?(?:是真的吗|真的假的|真的吗|是真的|为什么|怎么回事|我只是问你|我问的是你|回答我|说实话|嗯|哦)[呀啊呢吧嘛]*$')
     return bool(clauses) and any(identity.search(c) for c in clauses) and all(identity.search(c) or followup.fullmatch(c) for c in clauses)
+
+
+def local_request_only(text):
+    if not LOCAL_REQUEST.search(text):return False
+    if re.search(r'https?://|(?:联网|上网|网上|外网).{0,5}(?:查|搜|核实|确认)',text):return False
+    # A local document can discuss external subjects, but cannot establish a
+    # newly requested current forecast/headline alongside a personal lookup.
+    knowledge=bool(re.search(r'知识库|本地(?:文档|资料)',text))
+    if EXTERNAL_LOCAL_MIX.search(text) and (not knowledge or CURRENT.search(text)):return False
+    clauses=re.split(r'[，,。！？!?；;\n]|(?:并且|同时|顺便|另外|以及|并(?=核实|查询|查|告诉|搜索)|再(?=查|核实|帮我))',text)
+    return all(LOCAL_REQUEST.search(c) or not (factual(c) or EXPLICIT.search(c))
+               for c in clauses if c.strip())
+
+
+def local_query_evidence(state):
+    """Only a matched current-turn result from an enabled local built-in counts."""
+    tools={t['name']:t for t in state['snapshot'].get('tools',{}).values()
+           if t.get('enabled') and t.get('kind')=='builtin'
+           and t.get('builtin') in ('memory_search','knowledge_search')}
+    calls={}
+    for message in state.get('messages',[]):
+        if message.get('role')=='assistant':
+            for call in message.get('tool_calls',[]):
+                if call.get('id') and call.get('function',{}).get('name') in tools:calls[call['id']]=True
+        elif message.get('role')=='tool' and message.get('tool_call_id') in calls:
+            try:value=json.loads(message.get('content',''))
+            except (ValueError,TypeError):continue
+            if not isinstance(value,(dict,list)):continue
+            if isinstance(value,dict) and (value.get('ok') is False or value.get('success') is False
+                    or value.get('error') or value.get('isError') or value.get('status') in ('error','failed')):continue
+            return True  # Empty local results are meaningful, not lookup failures.
+    return False
 
 
 def source_reason(run,state,reply):
@@ -74,6 +108,7 @@ def query_for(run,state):
 def decide(run,state):
     text=run['input'];policy=state['snapshot']['agent'].get('web_policy','auto')
     if conversation_only(text):return dict(required=False,reason='身份、角色或对话记录追问，直接依据当前设定和会话回答')
+    if local_request_only(text):return dict(required=False,reason='本轮查询个人记忆或本地知识，使用已授权本地工具')
     if not allowed(state,run):return dict(required=False,reason='本轮关闭联网检索')
     from .mcp_policy import route
     selected=route(run,state)
@@ -186,13 +221,18 @@ class WebPolicy:
             self.ai.data.trace(run['id'],'新闻汇总完成',{'verified_items':len(state['news_packet']['items']),
                 'sources':[item['url'] for item in state['news_packet']['items']]})
             return 'done'
+        local_only=local_request_only(run['input'])
+        if local_only and local_query_evidence(state) and not state.get('web_evidence'):
+            state.pop('reply_failure_reason',None)
+            state['web_checked_reply']=reply
+            return 'done'
         attempts=state.get('web_evidence',[])
         has_results=any(e['status']=='ok' for e in attempts)
         if has_results:state.pop('reply_failure_reason',None)
         claim=claimed_lookup(reply) and not TRANSFORM.search(run['input']) and not conversation_only(run['input'])
         uncertain=factual(run['input']) and bool(UNCERTAIN.search(reply))
         auto=state['snapshot']['agent'].get('web_policy','auto')=='auto'
-        if not attempts and not state.get('web_repair') and auto and allowed(state,run) and (claim or uncertain):
+        if not local_only and not attempts and not state.get('web_repair') and auto and allowed(state,run) and (claim or uncertain):
             state['web_repair']=True
             decision={'required':True,'reason':'回复称已查证或事实不确定，但没有本轮工具记录','builtin':'web_search','arguments':{'query':query_for(run,state)}}
             state['web_repair_decision']=decision

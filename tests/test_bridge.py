@@ -201,7 +201,7 @@ def test_send_reuses_bound_window_without_search_or_profile_clicks(monkeypatch):
         else:
             raise AssertionError('Only pasting is needed; sending clicks the button')
     from pyweixin import SystemSettings
-    monkeypatch.setattr(SystemSettings, 'copy_text_to_clipboard', lambda value: state.update(clipboard=value))
+    monkeypatch.setattr('wechat_panel.wechat_clipboard.copy_text', lambda value: state.update(clipboard=value))
     monkeypatch.setattr(pyautogui, 'hotkey', hotkey)
     monkeypatch.setattr(win32gui, 'GetForegroundWindow', lambda: 123)
     monkeypatch.setattr(win32gui, 'IsWindow', lambda h:True)
@@ -210,8 +210,8 @@ def test_send_reuses_bound_window_without_search_or_profile_clicks(monkeypatch):
     assert obj.send(contact, text) == 'new'
     assert actions.count('click-send') == 1
     assert actions.count(('ctrl','v')) == 1
-    assert actions.count('read-account') == 1
-    assert actions == ['read-account', 'focus-window', 'focus-edit', ('ctrl','v'), 'click-send']
+    assert actions.count('read-account') == 2
+    assert actions == ['read-account', 'focus-window', 'focus-edit', ('ctrl','v'), 'read-account', 'click-send']
 
 
 def test_send_automatically_connects_missing_window_before_any_input(monkeypatch):
@@ -624,7 +624,7 @@ def test_send_reconnects_only_before_input_and_never_retries_uncertain_send(monk
         actions.append('paste-once')
         state['draft']=state['clipboard']
         if failure=='after-paste':raise StaleUIAError()
-    monkeypatch.setattr(SystemSettings,'copy_text_to_clipboard',lambda text:state.update(clipboard=text))
+    monkeypatch.setattr('wechat_panel.wechat_clipboard.copy_text',lambda text:state.update(clipboard=text))
     monkeypatch.setattr(pyautogui,'hotkey',paste)
     monkeypatch.setattr(win32gui,'IsWindow',lambda h:state['alive'])
     monkeypatch.setattr(win32gui,'GetForegroundWindow',lambda:123)

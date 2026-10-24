@@ -66,7 +66,7 @@ def make_bridge(monkeypatch, tmp_path, failure=None):
             pytest.fail(str(keys))
 
     monkeypatch.setattr(pyautogui, 'hotkey', hotkey)
-    monkeypatch.setattr(SystemSettings, 'copy_text_to_clipboard', lambda text: state.update(clipboard=[(13, text)]))
+    monkeypatch.setattr('wechat_panel.wechat_clipboard.copy_text', lambda text: state.update(clipboard=[(13, text)]))
     monkeypatch.setattr(wechat_draft, 'clipboard_read', lambda: list(state['clipboard']))
     monkeypatch.setattr(wechat_draft, 'clipboard_write', lambda values: state.update(clipboard=list(values)))
     monkeypatch.setattr(win32gui, 'GetForegroundWindow', lambda: 123)

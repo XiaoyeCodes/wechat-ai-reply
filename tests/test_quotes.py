@@ -149,7 +149,11 @@ def test_quoted_image_cannot_read_other_contact_media(quoted_env):
     other=CompanionStore(store).media('wechat:'+foreign['id'],media_bytes('red'))
     add_quote(quoted_env,'这张图里有什么？','图片',status='ready',media_id=other['id'])
     run=ready(quoted_env)
-    assert run['status']=='failed' and not calls and not store.pending()
+    from wechat_panel.failure_replies import REPLY
+    assert run['status']=='queued' and run['state']['task_failure'] and not calls
+    pending=store.pending()
+    assert len(pending)==1 and pending[0]['text']==REPLY and pending[0]['kind']=='text'
+    assert pending[0]['contact_id']==quoted_env[1]['id'] and not pending[0]['media_id']
 
 
 def test_native_image_read_is_scoped_and_not_repeated_after_restart(groups,monkeypatch):

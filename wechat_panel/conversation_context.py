@@ -5,7 +5,7 @@ HANDOFF_MESSAGES = 4
 HANDOFF_CHARS = 300
 
 
-def contact_context(ai, contact, agent, trigger_id=None, schedule=False, forget_before=0, exclude_ids=(),group_sender=None):
+def contact_context(ai, contact, agent, trigger_id=None, schedule=False, forget_before=0, exclude_ids=(),group_sender=None,queue_turn=False):
     from .quoted_context import history_text
     from .group_chats import is_group,context
     if is_group(contact):
@@ -20,6 +20,13 @@ def contact_context(ai, contact, agent, trigger_id=None, schedule=False, forget_
         limit = 120  # Its native context builder applies a character budget.
     boundary = contact.get('ai_context_start_message', 0)
     history = ai.store.messages(contact['id'], before=(trigger_id + 1) if trigger_id and not schedule else None, limit=200)
+    if queue_turn:
+        with ai.store.connect() as db:
+            late=[dict(m) for m in db.execute("SELECT m.* FROM messages m JOIN ai_runs r ON r.id=m.ai_run_id "
+                "WHERE m.contact_id=? AND m.id>? AND m.origin='ai' AND m.status='confirmed' "
+                "AND r.agent_id=? AND r.revision=? AND r.trigger_id<? ORDER BY m.id DESC LIMIT 200",
+                (contact['id'],trigger_id,agent['id'],contact['ai_revision'],trigger_id))]
+        history=sorted({m['id']:m for m in history+late}.values(),key=lambda m:m['id'])
     eligible = [m for m in history if m['id'] > forget_before and m['id'] not in exclude_ids
                 and (m['kind'] in ('text','image') or (m['kind']=='voice' and m.get('origin')=='ai'))
                 and not m.get('text_pending')

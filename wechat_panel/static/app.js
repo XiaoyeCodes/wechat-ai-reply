@@ -1,4 +1,4 @@
-import {initAI, refreshAI, scheduleAIRefresh, renderContactAI,activateAIView} from './ai.js?v=api-settings-1';
+import {initAI, refreshAI, scheduleAIRefresh, renderContactAI,activateAIView} from './ai.js?v=conversation-queue-1';
 import {initVoice,renderVoice} from './voice.js?v=voice-settings-3';
 import {initGroups,isGroup,groupSummary,contactKindChanged,newContactBody,renderGroupDetails,groupMessageSender,demoIncomingBody} from './groups.js?v=2';
 

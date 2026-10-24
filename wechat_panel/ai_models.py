@@ -86,7 +86,7 @@ class Tool(Config):
     capability: Literal['general','amap','mindmap'] = 'general'
     builtin: Literal['clock', 'calculator', 'knowledge_search','web_search','read_web','news_collect','financial_daily','weather',
                      'music_search','places_search','movie_search','memory_search','remember','forget',
-                     'set_reminder','generate_image','speak','use_skill','read_skill_file',
+                     'set_reminder','generate_image','speak','use_skill','read_skill_file','search_capabilities',
                      'platform_search','platform_read','platform_browse','platform_transcribe'] | None = None
     approval: Literal['auto', 'confirm'] = 'confirm'
     url: str = Field(default='', max_length=1000)

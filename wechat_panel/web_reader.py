@@ -41,19 +41,20 @@ def cli_json(name,args,timeout=40):
 def bilibili(url):
     match=re.search(r'(BV[a-zA-Z0-9]{10})(?:[/?#]|$)',url)
     if not match:raise ReadUnavailable('请提供包含 BV 号的完整 B 站视频链接')
+    from .platform_reader import require_content,transcript_text
     bvid=match[1];source='https://www.bilibili.com/video/'+bvid
     result={'url':source,'kind':'video','title':'','description':'','transcript':'','coverage':'metadata_only'}
     try:
-        raw=cli_json('bili',['video',bvid],20)
-        if raw.get('ok'):
+        raw=require_content(cli_json('bili',['video',bvid],20))
+        if isinstance(raw,dict) and raw.get('ok'):
             data=raw.get('data',{});video=data.get('video',{})
             result.update(title=video.get('title',''),description=video.get('description',''),duration_seconds=video.get('duration_seconds'))
             result['transcript']=data.get('subtitle',{}).get('text','') or ''
     except ReadUnavailable:pass
     if not result['transcript']:
         try:
-            subs=cli_json('opencli',['bilibili','subtitle',bvid,'-f','json','--window','background'],45)
-            if isinstance(subs,list):result['transcript']='\n'.join(str(s.get('content','')) for s in subs if isinstance(s,dict))[:30000]
+            subs=require_content(cli_json('opencli',['bilibili','subtitle',bvid,'-f','json','--window','background'],45))
+            if isinstance(subs,list):result['transcript']=transcript_text(subs)
         except ReadUnavailable:
             # Older Browser Bridge versions can accept named browser sessions
             # while rejecting the CLI's adapter session pre-navigation.
@@ -65,13 +66,32 @@ def bilibili(url):
                     capture_output=True,timeout=50,encoding='utf-8',errors='replace',
                     creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                 if run.returncode==0 and len(run.stdout)<2_000_000:
-                    subs=json.loads(run.stdout)
-                    if isinstance(subs,list):result['transcript']='\n'.join(str(s.get('content','')) for s in subs if isinstance(s,dict))[:30000]
+                    subs=require_content(json.loads(run.stdout))
+                    if isinstance(subs,list):result['transcript']=transcript_text(subs)
             except (ReadUnavailable,OSError,subprocess.TimeoutExpired,ValueError):pass
     if result['transcript'].strip():result['coverage']='subtitles';result['note']='根据字幕总结，不声称看过未提供的视频画面。'
     elif result['title']:result['note']='只获取到标题和简介，未取得字幕；不能据此编造视频全文。需要用户提供字幕或可用的音频转写服务。'
     else:raise ReadUnavailable('B 站视频信息与字幕读取失败，请检查浏览器连接或提供字幕')
     return result
+
+
+def page_content(text, title=''):
+    """Reject explicit proxy/error/challenge pages, not articles discussing them."""
+    if not isinstance(text,str) or len(text.strip())<30:
+        raise ReadUnavailable('网页正文为空或需要登录，无法据此总结')
+    head=text[:1800]
+    proxy_title=re.search(r'^Title:\s*(.+)$',head,re.M)
+    title=title or (proxy_title[1].strip() if proxy_title else '')
+    normalized=re.sub(r'[\s.!。！:：…]+$','',title.strip()).casefold()
+    blocked={'just a moment','access denied','403 forbidden','404 not found','attention required',
+             'attention required! | cloudflare','security verification','verify you are human',
+             '安全验证','人机验证','请完成安全验证','访问受限','拒绝访问'}
+    proxy_error=re.search(r'^Warning:.*(?:Target URL returned error|HTTP)\s*(?:403|404|429|5\d\d)\b',head,re.M|re.I)
+    plain_error=re.match(r'^(?:403\s+Forbidden|404\s+Not Found|Access Denied)\b',text.strip(),re.I)
+    login_only=normalized in {'login','log in','sign in','登录','登陆'} and len(text)<800
+    if normalized in blocked or proxy_error or plain_error or login_only:
+        raise ReadUnavailable('来源返回访问限制、登录或验证页面，未取得可用正文')
+    return text
 
 
 def read_page(url, platform_routing=True):
@@ -97,8 +117,8 @@ def read_page(url, platform_routing=True):
         with httpx.Client(timeout=20,follow_redirects=False) as client:
             r=client.get('https://r.jina.ai/'+url)
             if r.status_code==200 and r.text.strip() and len(r.content)<2_000_000:
-                return {'url':url,'kind':'web','coverage':'page','content':r.text[:24000]}
-    except httpx.HTTPError:pass
+                return {'url':url,'kind':'web','coverage':'page','content':page_content(r.text)[:24000]}
+    except (httpx.HTTPError,ReadUnavailable):pass
     try:
         target=url
         with httpx.Client(timeout=20,follow_redirects=False,headers={'User-Agent':'Mozilla/5.0 RelayReader/1.0'}) as client:
@@ -112,10 +132,11 @@ def read_page(url, platform_routing=True):
                         content.extend(chunk)
                         if len(content)>2_000_000:raise ReadUnavailable('网页过大，请提供具体文章链接')
                     charset=r.encoding or 'utf-8';mime=r.headers.get('content-type','')
-                text=content.decode(charset,errors='replace')
+                text=content.decode(charset,errors='replace');title=''
                 if 'html' in mime:
                     from bs4 import BeautifulSoup
                     soup=BeautifulSoup(text,'html.parser')
+                    title=soup.title.get_text(' ',strip=True) if soup.title else ''
                     for el in soup(['script','style','nav','footer','header','noscript']):el.decompose()
                     # AIHot /hot is a ranking with ten article/li cards. Taking
                     # its first article silently drops nine titles and heats.
@@ -123,7 +144,6 @@ def read_page(url, platform_routing=True):
                     body=(soup.find('main') or soup) if ranking else (soup.find('article') or soup.find('main') or soup)
                     text=body.get_text('\n',strip=True)
                 elif not any(m in mime for m in ('text/','application/json')):raise ReadUnavailable('该链接不是可读取的网页正文')
-                if len(text.strip())<30:raise ReadUnavailable('网页正文为空或需要登录，无法据此总结')
-                return {'url':target,'kind':'web','coverage':'page','content':text[:24000]}
+                return {'url':target,'kind':'web','coverage':'page','content':page_content(text,title)[:24000]}
     except httpx.HTTPError:raise ReadUnavailable('网页连接失败，请稍后重试或粘贴正文') from None
     raise ReadUnavailable('网页跳转过多，未取得正文')

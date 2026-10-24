@@ -141,3 +141,81 @@ def test_deepseek_short_tasks_disable_reasoning_to_preserve_answer_budget(monkey
     assert seen[-1]['thinking']=={'type':'disabled'}
     complete({**p,'thinking':'enabled','_structured':True},[{'role':'user','content':'JSON'}],[])
     assert seen[-1]['thinking']=={'type':'disabled'} and seen[-1]['response_format']=={'type':'json_object'}
+
+
+def install_reader_transport(monkeypatch,handler):
+    import httpx
+    from wechat_panel import web_reader
+    client=httpx.Client
+    monkeypatch.setattr(web_reader.httpx,'Client',lambda **kw:client(transport=httpx.MockTransport(handler),**kw))
+    monkeypatch.setattr('wechat_panel.companion_services.public_url',lambda url:url)
+
+
+@pytest.mark.parametrize('proxy_body',[
+    'Title: Just a moment...\nURL Source: https://example.com/\nMarkdown Content:\nVerify you are human before continuing.',
+    'Title: Article\nWarning: Target URL returned error 403: Forbidden\nMarkdown Content:\nThe requested page is unavailable.',
+    'Access Denied\nYou do not have permission to access this resource. Please contact the administrator.',
+    'OK',
+])
+def test_reader_never_uses_proxy_error_or_challenge_as_article(monkeypatch,proxy_body):
+    import httpx
+    from wechat_panel.web_reader import read_page
+    def get(request):
+        if request.url.host=='r.jina.ai':return httpx.Response(200,text=proxy_body)
+        return httpx.Response(200,headers={'content-type':'text/html'},text='<title>Just a moment...</title><main>Verify you are human before continuing. Browser verification is required to access this page.</main>')
+    install_reader_transport(monkeypatch,get)
+    with pytest.raises(ReadUnavailable):read_page('https://example.com/article',platform_routing=False)
+
+
+def test_reader_uses_real_source_when_proxy_returns_restriction(monkeypatch):
+    import httpx
+    from wechat_panel.web_reader import read_page
+    def get(request):
+        if request.url.host=='r.jina.ai':return httpx.Response(200,text='Title: Access denied\nURL Source: https://example.com/article\nMarkdown Content:\nThe proxy cannot access this article.')
+        return httpx.Response(200,headers={'content-type':'text/html'},text='<title>Browser security explained</title><article>This article explains how CAPTCHA and verify you are human challenges work. These phrases belong to the article text.</article>')
+    install_reader_transport(monkeypatch,get)
+    result=read_page('https://example.com/article',platform_routing=False)
+    assert result['coverage']=='page' and 'This article explains' in result['content']
+
+
+def test_reader_does_not_reject_real_articles_about_blocked_pages():
+    from wechat_panel.web_reader import page_content
+    content='An article about access denied errors and CAPTCHA. It describes causes and ways to debug the service.'
+    assert page_content(content,'Understanding access denied errors')==content
+
+
+@pytest.mark.parametrize('payload',[
+    {'title':'Access Denied','content':'The requested article is restricted and cannot be shown. Please verify browser access.'},
+    {'title':'Article','content':'Warning: Target URL returned error 429: Too Many Requests\nThe proxy did not retrieve the requested source.'},
+])
+def test_deepseek_fetch_rejects_explicit_source_restrictions(monkeypatch,payload):
+    from wechat_panel.companion_services import Services
+    services=Services(None)
+    monkeypatch.setattr(services,'get',lambda *args:{'driver':'deepseek'})
+    monkeypatch.setattr(services,'deepseek_call',lambda *args:payload)
+    def unavailable(url):raise ReadUnavailable('same public source unavailable')
+    monkeypatch.setattr(services,'read_web',unavailable)
+    monkeypatch.setattr('wechat_panel.companion_services.public_url',lambda url:url)
+    with pytest.raises(ReadUnavailable):services.fetch('configured','https://example.com/article')
+
+
+def test_deepseek_fetch_keeps_real_documentation_about_captcha(monkeypatch):
+    from wechat_panel.companion_services import Services
+    content='This documentation explains CAPTCHA and access denied errors with practical examples.'
+    services=Services(None)
+    monkeypatch.setattr(services,'get',lambda *args:{'driver':'deepseek'})
+    monkeypatch.setattr(services,'deepseek_call',lambda *args:{'title':'Troubleshooting browser checks','content':content})
+    monkeypatch.setattr('wechat_panel.companion_services.public_url',lambda url:url)
+    assert json.loads(services.fetch('configured','https://example.com/docs'))['content']==content
+
+
+def test_bilibili_never_uses_failure_message_as_subtitles(monkeypatch):
+    from types import SimpleNamespace
+    from wechat_panel import web_reader
+    def cli(name,args,timeout):
+        if name=='bili':return {'ok':True,'data':{'video':{'title':'Video title'}}}
+        return [{'status':'error','content':'Please sign in to read subtitles'}]
+    monkeypatch.setattr(web_reader,'cli_json',cli)
+    monkeypatch.setattr(web_reader.subprocess,'run',lambda *a,**kw:SimpleNamespace(returncode=1,stdout=''))
+    result=bilibili('https://www.bilibili.com/video/BV19cHY6TEhs')
+    assert result['coverage']=='metadata_only' and not result['transcript']

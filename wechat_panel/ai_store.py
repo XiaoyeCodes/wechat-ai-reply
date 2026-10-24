@@ -248,10 +248,17 @@ class AIStore:
             rows=db.execute('SELECT id,contact_id,agent_id,trigger_id,mode,dry_run,input,status,reply,error,created_at,updated_at,schedule_id FROM ai_runs '+
                 ('WHERE contact_id=? ' if contact_id else '')+'ORDER BY created_at DESC LIMIT 50',
                 (contact_id,) if contact_id else ()).fetchall()
-            return [dict(row) for row in rows]
+            result=[dict(row) for row in rows]
+        from .conversation_queue import position
+        for run in result:
+            if run['contact_id'] and run['status']=='pending':run['queue_position']=position(self.store,run)
+        return result
 
     def detail(self,rid):
         result=self.run(rid);state=result.pop('state')
+        if state.get('conversation_queue') and result['status']=='pending':
+            from .conversation_queue import position
+            result['queue_position']=position(self.store,result)
         result['pdf'] = state.get('pdf')
         result['approval_scope']=state['snapshot']['agent'].get('hermes_approval_scope','operation')
         with self.store.connect() as db:
@@ -281,6 +288,14 @@ class AIStore:
             db.execute("UPDATE hermes_confirmations SET status='cancelled' WHERE contact_id=? AND status='pending'",(cid,))
             self.store.event(db,'ai.run',cid,detail=reason)
 
+    def cancel_run(self,rid,reason='已取消当前任务'):
+        with self.store.connect() as db:
+            db.execute("UPDATE ai_runs SET status='cancelled',error=?,updated_at=? WHERE id=? AND status IN ('pending','running','waiting_approval','draft','queued')",(reason,now(),rid))
+            db.execute("UPDATE ai_approvals SET status='cancelled' WHERE run_id=? AND status='pending'",(rid,))
+            db.execute("UPDATE hermes_confirmations SET status='cancelled' WHERE run_id=? AND status='pending'",(rid,))
+            db.execute("UPDATE messages SET status='cancelled',error=? WHERE ai_run_id=? AND origin IN ('ai','approval','ai_progress') AND status='queued'",(reason,rid))
+            self.store.event(db,'ai.run',run_id=rid,detail=reason)
+
     def cancel_all(self,reason):
         for contact in self.store.contacts(all_accounts=True):self.cancel_contact(contact['id'],reason)
         with self.store.connect() as db:
@@ -305,7 +320,10 @@ class AIStore:
             from .conversation_turn import latest_id
             latest=latest_id(db,contact['id'],run['state']['snapshot']['agent'],group_sender=run['state'].get('group_sender'))
             from .hermes_confirmations import pending_reply
-            current=(latest==(run.get('resume_message_id') or run['trigger_id']) or pending_reply(db,run,latest))
+            if run['state'].get('conversation_queue'):
+                from .conversation_queue import current as queued_current
+                current=queued_current(db,contact,run)
+            else:current=(latest==(run.get('resume_message_id') or run['trigger_id']) or pending_reply(db,run,latest))
         return (not self.store.paused() and settings['enabled'] and contact['listening']
                 and contact['mode']==run['mode'] and contact['ai_agent_id']==run['agent_id']
                 and contact['ai_revision']==run['revision'] and current)

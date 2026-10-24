@@ -31,6 +31,7 @@ def _worker_main(commands, output, demo, instances, state_path=None):
     health = dict(state='starting', detail='正在初始化微信连接', account_id=None)
     identity_attempt = None
     identity_error = ''
+    identity_retry_due, identity_retry_attempts = 0, 0
 
     def emit(kind, **data):
         output.put(dict(kind=kind, **data))
@@ -44,7 +45,7 @@ def _worker_main(commands, output, demo, instances, state_path=None):
         return False
 
     def probe(reveal=False):
-        nonlocal bridge, health, identity_attempt, identity_error
+        nonlocal bridge, health, identity_attempt, identity_error, identity_retry_due, identity_retry_attempts
         previous_account = health.get('account_id')
         previous_session = health.get('session_key')
         try:
@@ -57,20 +58,34 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                      account_id=health.get('account_id'))
                 bridge.reveal()
                 health = bridge.health()
-            if health['state'] in ('offline','account_changed'):
+            if health['state'] == 'offline':
                 identity_attempt = None
+                identity_retry_due, identity_retry_attempts = 0, 0
             if (health['state'] in ('ready','account_changed') and not health.get('account_id')
                     and hasattr(bridge,'identify') and (not paused or reveal)):
                 key = health.get('session_key', health['state'])
-                if reveal or identity_attempt != key:
+                if identity_attempt != key:
+                    identity_retry_due, identity_retry_attempts = 0, 0
+                retry_ready = identity_retry_due and time.monotonic() >= identity_retry_due
+                if reveal or identity_attempt != key or retry_ready:
                     identity_attempt = key
                     try:
                         health = bridge.identify()
                         identity_error = ''
+                        identity_retry_due, identity_retry_attempts = 0, 0
                     except Exception as exc:
                         if hasattr(bridge,'_record'):
                             bridge._record('connection.identity_failed',error=str(exc),trace=traceback.format_exc())
-                        identity_error = f'微信账号核验失败：{exc}。请在运行状态重新连接'
+                        if isinstance(exc, DesktopBusy) or connection_error(exc):
+                            identity_retry_attempts += 1
+                            delay = min(2**min(identity_retry_attempts-1, 5), 30)
+                            identity_retry_due = time.monotonic()+delay
+                            identity_error = f'微信账号暂时无法核验，{delay} 秒后自动重试'
+                        else:
+                            # Identity conflicts need an explicit user retry;
+                            # never keep reopening a profile for fixed errors.
+                            identity_retry_due = 0
+                            identity_error = f'微信账号核验失败：{exc}。请在运行状态重新连接'
                 if identity_error:
                     health = dict(state='unavailable', detail=identity_error, account_id=None)
         except Exception as exc:
@@ -113,15 +128,19 @@ def _worker_main(commands, output, demo, instances, state_path=None):
         attached.discard(cid)
         if hasattr(bridge, '_record'):
             bridge._record('connection.failed', contact, error=str(exc), trace=traceback.format_exc())
-        if connection_error(exc):
+        if isinstance(exc, DesktopBusy) or connection_error(exc):
             attempt = retry_attempts.get(cid, 0)+1
             retry_attempts[cid] = attempt
             delay = min(2**min(attempt-1, 5), 30)
             retry_due[cid] = time.monotonic()+delay
             blocked.discard(cid)
-            if hasattr(bridge, 'invalidate'):
+            # Focus/occlusion does not invalidate a verified window binding.
+            # Retain it so retrying need not search or reopen the conversation.
+            if not isinstance(exc, DesktopBusy) and hasattr(bridge, 'invalidate'):
                 bridge.invalidate(cid)
-            detail = f'微信聊天窗口暂时不可用，{delay} 秒后自动重新连接'
+            detail = (f'桌面暂时忙碌，{delay} 秒后自动重试连接'
+                      if isinstance(exc, DesktopBusy)
+                      else f'微信聊天窗口暂时不可用，{delay} 秒后自动重新连接')
             listener_states[cid] = 'reconnecting'
             emit('listener', contact_id=cid, state='reconnecting', detail=detail)
         else:
@@ -223,22 +242,21 @@ def _worker_main(commands, output, demo, instances, state_path=None):
                         # manual takeover can arrive while the worker reconnects.
                         if not ai_current(command):continue
                         message = send_store.message(command['message_id']) if send_store else None
-                        if message and message['kind'] == 'file':
-                            from .financial_pdf import report_path
-                            path = report_path(send_store.path.parent, message['ai_run_id'])
-                            result = {'source_key': bridge.send_file(contact, path)}
-                        else:
-                            if send_store and command.get('message_id'):
-                                bridge.receipt_observer=lambda stage,baseline=None,count=0:send_store.send_receipt(command['message_id'],stage,baseline,count)
-                            try:
-                                if message and message['kind']=='image':
-                                    from .image_delivery import deliver
-                                    result=deliver(bridge,send_store,message,contact)
-                                elif message and message.get('origin')=='ai':
-                                    from .voice_reply import deliver
-                                    result=deliver(bridge,send_store,message,contact,demo=demo)
-                                else:result = {'source_key': bridge.send(contact, command['text'])}
-                            finally:bridge.receipt_observer=None
+                        if send_store and command.get('message_id'):
+                            bridge.receipt_observer=lambda stage,baseline=None,count=0:send_store.send_receipt(command['message_id'],stage,baseline,count)
+                        try:
+                            if message and message['kind']=='file':
+                                from .financial_pdf import report_path
+                                path=report_path(send_store.path.parent,message['ai_run_id'])
+                                result={'source_key':bridge.send_file(contact,path)}
+                            elif message and message['kind']=='image':
+                                from .image_delivery import deliver
+                                result=deliver(bridge,send_store,message,contact)
+                            elif message and message.get('origin')=='ai':
+                                from .voice_reply import deliver
+                                result=deliver(bridge,send_store,message,contact,demo=demo)
+                            else:result = {'source_key': bridge.send(contact, command['text'])}
+                        finally:bridge.receipt_observer=None
                         if contact['listening']:
                             blocked.discard(contact['id'])
                             attached.add(contact['id'])

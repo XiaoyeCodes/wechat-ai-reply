@@ -10,7 +10,7 @@ from wechat_panel.bridge import SendUncertain
 def test_pdf_sent_once_and_requires_new_outgoing_file(monkeypatch, tmp_path, mode):
     import pyautogui
     import win32gui
-    from pyweixin import SystemSettings
+    from wechat_panel import wechat_clipboard
     path = tmp_path / 'report.pdf'
     path.write_bytes(b'%PDF-1.4\n% test')
     state = {'pastes':0,'clicks':0,'sent':False}
@@ -30,7 +30,7 @@ def test_pdf_sent_once_and_requires_new_outgoing_file(monkeypatch, tmp_path, mod
         state['clicks'] += 1
         if mode=='click_sends':state['sent']=True
     bridge._click=click
-    monkeypatch.setattr(SystemSettings,'copy_files_to_clipboard',lambda **kw:None)
+    monkeypatch.setattr(wechat_clipboard,'copy_files',lambda **kw:None)
     monkeypatch.setattr(pyautogui,'hotkey',paste)
     monkeypatch.setattr(win32gui,'GetForegroundWindow',lambda:123)
     monkeypatch.setattr(win32gui,'GetAncestor',lambda h,f:h)

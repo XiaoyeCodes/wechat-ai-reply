@@ -188,7 +188,7 @@ def test_empty_fetch_does_not_return_model_inventions(runtime,monkeypatch):
     original=ai.model_call
     ai.model_call=lambda p,m,t:({'content':'我找到五条重要新闻'}, {}) if any(x['role']=='tool' for x in m) else original(p,m,t)
     r=run(ai,agent)
-    assert r['status']=='completed' and '没有返回可用条目' in r['reply']
+    assert r['status']=='failed' and r['reply']=='我遇到点问题，未能完成该任务。'
 
 
 def test_tool_schema_migration_preserves_user_permissions(tmp_path):
@@ -199,3 +199,24 @@ def test_tool_schema_migration_preserves_user_permissions(tmp_path):
     migrated=AIStore(store).get('tools',t['id'])
     assert not migrated['enabled'] and migrated['approval']=='confirm'
     assert migrated['parameters']['properties']==native.PROPERTIES and migrated['parameters']['required']==[]
+
+
+@pytest.mark.parametrize('policy,text,links',[
+    ('requested','汇总今天的新闻',False),
+    ('requested','汇总今天的新闻，附上原文链接',True),
+    ('requested','汇总新闻，不要链接',False),
+    ('auto','汇总今天的新闻',True),
+])
+def test_news_respects_agent_source_preference(tmp_path,policy,text,links):
+    from types import SimpleNamespace
+    import uuid
+    s=state();s['snapshot']['agent']['source_policy']=policy
+    s['native_news']={'instructions':'报告模板要求附原文链接。','menu':True}
+    run={'id':str(uuid.uuid4()),'input':text,'created_at':STAMP}
+    prompt=native.prompt(run,s)
+    assert ('当前回复不展示原文、参考链接' in prompt) is (not links)
+    ai=SimpleNamespace(store=SimpleNamespace(path=tmp_path/'panel.db'),data=SimpleNamespace(trace=lambda *args:None))
+    reply='新闻摘要。\n\n原文：https://example.org/news'
+    assert native.finish(ai,run,s,reply)=='done'
+    assert ('https://example.org/news' in s['web_checked_reply']) is links
+    assert Path(s['native_news_report']).read_text(encoding='utf-8')==s['web_checked_reply']

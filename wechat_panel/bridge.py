@@ -704,8 +704,7 @@ class WeixinBridge:
         edit.click_input()
         edit.set_text(lookup)
         results = main.child_window(**self.Lists.SearchResult).wait('ready', timeout=4)
-        candidates = [x for x in results.children(control_type='ListItem')
-                      if x.class_name() == 'mmui::SearchContentCellView' and x.window_text() == lookup]
+        candidates=self._search_matches(results.children(control_type='ListItem'),lookup,chat_type)
         if len(candidates) != 1:
             raise BridgeError(f'找到 {len(candidates)} 个同名搜索结果，请使用唯一微信备注')
         self.search_avatar = None
@@ -728,6 +727,25 @@ class WeixinBridge:
         # Wait for the actual chat input, not a retained/hidden title node.
         main.child_window(**self.Edits.CurrentChatEdit).wait('visible', timeout=3)
         return main
+
+    @staticmethod
+    def _search_matches(rows,lookup,chat_type='direct'):
+        if lookup=='文件传输助手' and chat_type=='direct':
+            # Weixin exposes this built-in self destination under Features,
+            # using generic cells also used by identically named web results.
+            in_features=False;matches=[]
+            for row in rows:
+                title=row.window_text()
+                if in_features:
+                    # Only consecutive exact built-in results belong to this
+                    # section. A later web/contact section must never qualify.
+                    if title!=lookup or row.class_name()!='mmui::XTableCell':break
+                    matches.append(row)
+                    continue
+                if title in ('功能','Features'):
+                    in_features=True;continue
+            return matches
+        return [row for row in rows if row.class_name()=='mmui::SearchContentCellView' and row.window_text()==lookup]
 
     def _read_profile(self, window, lookup):
         """Verify identity in the actual chat, including independent windows."""
@@ -856,7 +874,7 @@ class WeixinBridge:
         import win32gui
         point = (int(rect.left+rect.width()*0.55), rect.mid_point().y)
         if win32gui.GetAncestor(win32gui.WindowFromPoint(point), 2) != main.handle:
-            raise BridgeError('联系人会话被其他窗口遮挡，请重试连接')
+            raise DesktopBusy('联系人会话被其他窗口遮挡，稍后自动重新连接')
         self._record('ui.open_dialog', contact)
         pyautogui.doubleClick(*point, interval=0.1, _pause=False)
         deadline = time.monotonic()+3
@@ -901,6 +919,12 @@ class WeixinBridge:
         self._ensure_account(contact['account_id'])
         self._check_account(contact)
         window = self._find_dialog(contact)
+        if (window is not None and contact.get('wechat_id')=='filehelper'
+                and contact.get('lookup')=='文件传输助手' and contact.get('chat_type')=='direct'):
+            # A temporary self-test binding has no verified contact profile.
+            # Check again inside the actual worker; the preflight and attach
+            # may be separated by another window opening on the desktop.
+            raise BridgeError('未绑定的同名窗口不能作为文件传输助手，已停止操作')
         if window is None:
             window = self._open_dialog(contact)
         if self._title(window) != contact['lookup']:
@@ -1326,7 +1350,7 @@ class WeixinBridge:
     def _send_text(self, contact, text):
         import pyautogui
         import win32gui
-        from pyweixin import SystemSettings
+        from .wechat_clipboard import copy_text
         self._record('send.begin', contact)
         window, edit, button, before_count = self._prepare_send(contact, text)
         baseline=[dict(x) for x in self.snapshot(contact)]
@@ -1343,15 +1367,28 @@ class WeixinBridge:
                 draft.stash()
             if win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)!=window.handle or edit.window_text():
                 raise SendUncertain('粘贴前焦点或输入内容已变化，尚未发送；已保护现有输入内容')
-            SystemSettings.copy_text_to_clipboard(text)
+            copy_text(text)
             if win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)!=window.handle:
                 raise SendUncertain('粘贴前焦点已变化，尚未发送；已停止键盘输入')
             self._record('ui.input.paste', contact)
             pyautogui.hotkey('ctrl', 'v', _pause=False)
-            time.sleep(0.2)
             from .wechat_text import pasted_text_matches
-            if not pasted_text_matches(self,window,edit,contact,text):
-                raise SendUncertain('粘贴内容无法核对，尚未按发送键；请检查微信输入框')
+            ready=False
+            for _ in range(40):
+                time.sleep(.1)
+                if win32gui.GetAncestor(win32gui.GetForegroundWindow(),2)!=window.handle:
+                    raise SendUncertain('粘贴后焦点发生变化，尚未点击发送；已保留输入内容')
+                try:
+                    if pasted_text_matches(self,window,edit,contact,text) and button.is_enabled():
+                        ready=True;break
+                except Exception as exc:
+                    if not connection_error(exc):raise
+            if not ready:
+                raise SendUncertain('粘贴内容或发送按钮尚未就绪，未点击发送；已保留输入内容')
+            self._check_account(contact)
+            self._check_chat_type(window,contact)
+            if self._title(window)!=contact['lookup']:
+                raise SendUncertain('发送前目标聊天已变化，未点击发送')
             if win32gui.GetAncestor(win32gui.GetForegroundWindow(), 2) != window.handle:
                 raise SendUncertain('发送前焦点发生变化，请检查微信输入框')
             if not button.is_enabled():
@@ -1360,9 +1397,15 @@ class WeixinBridge:
             if observer:observer('attempted')
             self._click(button, contact, 'ui.send_once')
             from .send_receipts import match
-            for attempt in range(12):
+            deadline=time.monotonic()+12
+            for attempt in range(48):
                 time.sleep(0.25)
-                items = self.snapshot(contact)
+                try:items=self.snapshot(contact)
+                except Exception as exc:
+                    if not connection_error(exc):raise
+                    self._record('send.receipt.read_retry',contact,kind='text',error=type(exc).__name__)
+                    if time.monotonic()>=deadline:break
+                    continue
                 found=match(baseline,items,text,before_count)
                 if found:
                     self._record('send.confirmed', contact, source_key=found['key'])
@@ -1374,6 +1417,7 @@ class WeixinBridge:
                         import win32con
                         win32gui.RedrawWindow(window.handle,None,None,win32con.RDW_INVALIDATE|win32con.RDW_UPDATENOW|win32con.RDW_ALLCHILDREN)
                     except Exception:pass
+                if time.monotonic()>=deadline:break
             raise SendUncertain('已尝试发送，但暂未能核对新增的本人消息；已安排后台复核（最多 2 分钟），请勿重复发送')
         except SendUncertain:
             self._record('send.uncertain', contact)

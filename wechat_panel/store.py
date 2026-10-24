@@ -410,10 +410,38 @@ class Store:
                 self.event(db, 'message.updated', contact_id, message_id=cursor.lastrowid)
         return [self.message(mid) for mid in ids]
 
+    def enqueue_ai_bundle(self, contact_id, run_id, text, media_ids, pdf_name=''):
+        """Queue a checked compound result atomically before any part can send."""
+        from .wechat_text import split_text
+        if self.contact(contact_id)['mode']=='listen_only':raise ValueError('仅监听模式不能发送')
+        parts=[('text',part,'',f'ai:{run_id}:summary:{index}')
+               for index,part in enumerate(split_text(text))] if text.strip() else []
+        parts.extend(('image','[图片]',mid,f'ai:{run_id}:image:{index}')
+                     for index,mid in enumerate(dict.fromkeys(media_ids)))
+        if pdf_name:parts.append(('file',pdf_name,'',f'ai:{run_id}'))
+        ids=[]
+        with self.connect() as db:
+            for kind,body,media_id,key in parts:
+                prior=db.execute('SELECT * FROM messages WHERE contact_id=? AND client_key=?',(contact_id,key)).fetchone()
+                if prior:
+                    if (prior['kind'],prior['text'],prior['media_id'])!=(kind,body,media_id):
+                        raise ValueError('相同请求标识不能用于不同交付内容')
+                    ids.append(prior['id']);continue
+                cursor=db.execute('''INSERT INTO messages
+                    (contact_id,direction,text,status,created_at,client_key,origin,ai_run_id,kind,media_id)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                    (contact_id,'outgoing',body,'queued',now(),key,'ai',run_id,kind,media_id))
+                ids.append(cursor.lastrowid)
+                self.event(db,'message.updated',contact_id,message_id=cursor.lastrowid)
+        return [self.message(mid) for mid in ids]
+
     def set_message_state(self, message_id, status, error='', source_key=None, reconciled=False):
         with self.connect() as db:
+            if reconciled:db.execute('BEGIN IMMEDIATE')
             row = db.execute('SELECT * FROM messages WHERE id=?', (message_id,)).fetchone()
             if row:
+                if reconciled and row['status']!='uncertain':
+                    return  # A cancellation/failure after the snapshot query wins.
                 if source_key:
                     # A passive snapshot can observe the outgoing bubble before
                     # the worker's send confirmation arrives. Merge only that
@@ -478,15 +506,25 @@ class Store:
                 WHERE m.contact_id=? AND m.status='uncertain' AND r.attempted_at IS NOT NULL
                 ORDER BY m.id DESC LIMIT 10''',(contact_id,))]
         for row in rows:
-            if row['kind'] in ('voice','image'):continue  # Media needs its own in-flight receipt; never match a text placeholder.
-            if (datetime.now(timezone.utc)-datetime.fromisoformat(row['attempted_at'])).total_seconds()>120:continue
-            found=match(json.loads(row['baseline']),items,row['text'],row['before_count'])
+            if row['kind'] not in ('text','file','image'):continue
+            try:
+                age=(datetime.now(timezone.utc)-datetime.fromisoformat(row['attempted_at'])).total_seconds()
+                if not 0<=age<=120:continue
+                found=match(json.loads(row['baseline']),items,row['text'],row['before_count'],kind=row['kind'])
+            except (TypeError,ValueError,KeyError):
+                continue  # Corrupt/stale intent is not evidence of delivery.
             if not found:continue
+            with self.connect() as db:
+                claimed=db.execute('''SELECT 1 FROM messages WHERE contact_id=? AND source_key=?
+                    AND id!=? AND status!='observed' ''',(contact_id,found['key'],row['id'])).fetchone()
+            if claimed:continue  # One observed bubble can confirm only one send.
             note=('消息已核对发送；'+row['error'][row['error'].find('原草稿'):]
                   if '恢复备份' in row['error'] and '原草稿' in row['error'] else '')
             self.set_message_state(row['id'],'confirmed',error=note,source_key=found['key'],reconciled=True)
             with self.connect() as db:
-                self.event(db,'send.recovered',contact_id,message_id=row['id'],source_key=found['key'],detail='后台已核对新增本人消息，发送状态已自动恢复')
+                confirmed=db.execute("SELECT 1 FROM messages WHERE id=? AND status='confirmed' AND source_key=?",
+                                     (row['id'],found['key'])).fetchone()
+                if confirmed:self.event(db,'send.recovered',contact_id,message_id=row['id'],source_key=found['key'],detail='后台已核对新增本人消息，发送状态已自动恢复')
 
     def ai_send_valid(self, message):
         if not self.account_matches(self.contact(message['contact_id'])):return False
@@ -511,10 +549,15 @@ class Store:
             from .conversation_turn import latest_id
             from .ai_store import AIStore
             latest=latest_id(db,row['contact_id'],state['snapshot']['agent'],group_sender=state.get('group_sender'))
+            current=(row['resume_message_id'] or row['trigger_id'])==latest
+            if state.get('conversation_queue'):
+                from .conversation_queue import current as queued_current
+                contact=db.execute('SELECT * FROM contacts WHERE id=?',(row['contact_id'],)).fetchone()
+                current=queued_current(db,contact,row)
             paused=db.execute("SELECT value FROM settings WHERE key='paused'").fetchone()[0]=='true'
             return (not paused and settings['enabled'] and row['listening'] and row['status'] in (('running','queued') if progress else ('queued',))
                     and row['mode']==row['current_mode'] and row['agent_id']==row['ai_agent_id']
-                    and row['revision']==row['ai_revision'] and (row['resume_message_id'] or row['trigger_id'])==latest)
+                    and row['revision']==row['ai_revision'] and current)
 
     def recover(self):
         with self.connect() as db:

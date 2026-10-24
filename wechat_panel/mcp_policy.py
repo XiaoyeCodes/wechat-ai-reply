@@ -1,6 +1,8 @@
 """Task-specific MCP routing; tool availability is not authorization to use it."""
 import json
+import math
 import re
+from datetime import date
 from .web_policy import allowed
 
 MINDMAP=re.compile(r'思维导图|脑图|mind\s*map|TreeMind|树图',re.I)
@@ -8,6 +10,8 @@ CREATE=re.compile(r'生成|制作|做(?:一|个|成|份)|画|整理|转成|转�
 NO_MAP=re.compile(r'(?:不要|不用|别|无需).{0,5}(?:导图|脑图|树图|mind\s*map)',re.I)
 GEO=re.compile(r'天气|气温|降雨|下雨|要带伞|穿什么|附近.{0,15}(?:餐|店|馆|酒店|公园|医院|地铁)|(?:找|推荐|查询).{0,10}(?:餐厅|酒店|咖啡店)|导航|怎么走|怎么去|如何去|开车|驾车|骑行|步行|公交|地铁|打车|经纬度|路线|距离')
 ABSTRACT=re.compile(r'学习路线|技术路线|成长路线|职业路线|人生|思维导图|脑图|心理距离|心的距离')
+WEATHER=re.compile(r'天气|气温|降雨|下雨|带.{0,3}伞|穿什么|weather|forecast',re.I)
+OTHER_GEO=re.compile(r'附近.{0,15}(?:餐|店|馆|酒店|公园|医院|地铁)|(?:找|推荐|查询).{0,10}(?:餐厅|酒店|咖啡店)|导航|怎么走|怎么去|如何去|开车|驾车|骑行|步行|公交|地铁|打车|经纬度|路线|距离|坐标|地址|定位|地图|交通|路况|拥堵')
 
 
 def mindmap_requested(text):
@@ -23,6 +27,44 @@ def task_text(run,state):
             if GEO.search(previous[-2]['content']) and not ABSTRACT.search(previous[-2]['content']) and not re.search(r'不用|不要|不查|换个|算了|累|难过|再见',text):
                 return previous[-2]['content']+'\n补充信息：'+text
     return text
+
+
+def weather_only(run,state):
+    text=task_text(run,state)
+    return bool(WEATHER.search(text) and not OTHER_GEO.search(text)
+                and not re.search(r'高德|amap',text,re.I))
+
+
+def weather_receipt(state,tool,city,result):
+    """Only the controlled built-in weather adapter can provide this receipt."""
+    try:data=json.loads(result) if isinstance(result,str) else result
+    except (TypeError,ValueError):data=None
+    item={'tool':tool['name'],'provider':'open-meteo','city':city,'ok':False}
+    if (isinstance(data,dict) and data.get('source')=='https://open-meteo.com/'
+            and isinstance(data.get('city'),str) and data['city'].strip()
+            and data.get('ok') is not False and not data.get('error')):
+        number=lambda x:type(x) in (int,float) and math.isfinite(x)
+        current=data.get('weather')
+        has_current=isinstance(current,dict) and any(number(current.get(k)) for k in
+            ('temperature_2m','apparent_temperature','precipitation','weather_code'))
+        daily=data.get('daily');dates=[]
+        if isinstance(daily,dict) and isinstance(daily.get('time'),list):
+            for index,day in enumerate(daily['time']):
+                try:date.fromisoformat(day)
+                except (TypeError,ValueError):continue
+                if any(isinstance(daily.get(k),list) and len(daily[k])>index and number(daily[k][index])
+                       for k in ('temperature_2m_max','temperature_2m_min','precipitation_probability_max','weather_code')):
+                    dates.append(day)
+        item.update(city=data['city'],ok=bool(has_current or dates),has_current=has_current,
+                    forecast_dates=dates,source=data['source'])
+    state.setdefault('weather_results',[]).append(item)
+    return item['ok']
+
+
+def failed_reply(state,reason):
+    from .failure_replies import REPLY
+    state['reply_failure_reason']=reason
+    return REPLY,False
 
 
 def route(run,state):
@@ -46,9 +88,14 @@ def prompt(run,state):
     if not selected:return ''
     state['mcp_route']=selected
     profile=state.get('dynamic_context',{}).get('user_profile',{})
+    weather_choice=(selected=='amap' and weather_only(run,state) and any(
+        t.get('enabled') and t.get('builtin')=='weather' for t in state['snapshot'].get('tools',{}).values()))
+    provider_rule=('仅查询天气且未指定高德时，可以任选已授权的 weather（来源 Open-Meteo）或高德天气。'
+        '任一来源已返回本轮有效天气就直接回答，不重复补查高德；按实际来源表述，不把 Open-Meteo 结果称为高德结果。'
+        if weather_choice else '高德：地点、天气与交通优先调用高德，不用普通网页搜索替代；坐标先地理编码。')
     return ('\n# 本轮专业工具规则\n本轮优先工具：'+selected+
         '。工具可用不代表已调用；只根据真实返回结果回答，不杜撰地址、天气、路线或作品链接。'
-        '高德：地点、天气与交通优先调用高德，不用普通网页搜索替代；坐标先地理编码。'
+        +provider_rule+
         '缺少城市、当前位置或起终点时先向用户补充询问，不猜位置，不用服务器 IP 定位用户。'
         '可以使用本轮明确地点、用户此前明确告知且仍有效的位置；位置不明确不调用附近搜索。'
         '天气有预报期限，未覆盖日期明确说明。打车/导航结果只是打开 App 的链接，不代表已叫车或付款。'
@@ -84,17 +131,22 @@ def check(run,state,reply):
     selected=state.get('mcp_route')
     if not selected:return reply,False
     results=[r for r in state.get('mcp_results',[]) if r['capability']==selected]
+    if selected=='amap' and weather_only(run,state):
+        weather=[r for r in state.get('weather_results',[]) if r.get('provider')=='open-meteo']
+        if any(r.get('ok') for r in weather):
+            state.pop('reply_failure_reason',None)
+            return reply,False
+        if weather and not any(r['ok'] for r in results):
+            return failed_reply(state,'天气工具未返回可核验的天气结果')
     if results and not any(r['ok'] for r in results):
-        return ('高德这次没有返回可用结果，暂时无法核实，请稍后再试。' if selected=='amap' else
-                'TreeMind 这次没有成功返回导图，请检查连接配置和服务状态。'),False
+        return failed_reply(state,selected+' 专业工具未返回可用结果')
     # A clarification is a valid next step when necessary input is missing.
     clarification=bool(re.search(r'你在|你想查|哪个城市|哪座城市|哪里出发|从哪|到哪|起点|终点|请(?:提供|补充|告诉)|(?:什么|哪个).{0,5}(?:主题|内容)|(?:需要|缺少).{0,8}(?:城市|位置|主题|内容)',reply))
     if not results and not clarification:
         if not state.get('mcp_repair'):
             state['mcp_repair']=True
             return '',True
-        return ('本轮还没有取得高德查询结果，暂时无法确认；请检查工具授权和连接配置。' if selected=='amap' else
-                '还没有取得 TreeMind 的生成结果，暂时不能提供导图链接。'),False
+        return failed_reply(state,'本轮未取得 '+selected+' 专业工具的实际结果')
     if selected=='mindmap' and results:
         links=list(dict.fromkeys(u for r in results if r['ok'] for u in r.get('links',[])))
         claimed=re.findall(r'https?://[^\s<>]+',reply)

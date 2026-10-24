@@ -59,7 +59,12 @@ def valid_notice(store,message):
         if (not contact or paused or not enabled or not contact['listening'] or contact['ai_agent_id']!=run['agent_id']
                 or contact['ai_revision']!=run['revision'] or contact['mode']!=run['mode']):return False
         latest=db.execute("SELECT MAX(id) FROM messages WHERE contact_id=? AND direction='incoming' AND historical=0",(contact['id'],)).fetchone()[0]
-        if latest!=(run['resume_message_id'] or run['trigger_id']):return False
+        from .ai_store import AIStore
+        state=AIStore.decode_state(run['state'])
+        if state.get('conversation_queue'):
+            from .conversation_queue import current
+            if not current(db,contact,run):return False
+        elif latest!=(run['resume_message_id'] or run['trigger_id']):return False
         if receipt['notice_id']==message['id']:
             return run['status']=='waiting_approval' and receipt['status']=='pending' and receipt['expires']>time.time()
         return receipt['status'] in ('rejected','expired') and run['status']=='cancelled' and time.time()<receipt['expires']+120

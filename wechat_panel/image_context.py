@@ -27,6 +27,11 @@ def prepare(runtime,run,state,config,context):
         if ref.get('message_id'):
             source=ai.store.message(ref['message_id'])
             if not source or source['contact_id']!=run['contact_id']:raise ValueError('图片不属于当前联系人')
+            if source['direction']=='outgoing':
+                from .image_generation import sent_reference
+                verified=sent_reference(ai,ai.store.contact(source['contact_id']),source,state)
+                if not verified:raise ValueError('生成图尚未核对发送或不属于本轮会话')
+                ref={**ref,**verified}
             ref={**ref,'media_id':source.get('media_id','')}
         permitted={scope}
         if run['contact_id']:permitted.add('wechat:'+run['contact_id'])

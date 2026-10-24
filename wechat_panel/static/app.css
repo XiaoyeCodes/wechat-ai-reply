@@ -26,3 +26,5 @@ dialog{width:460px;max-width:calc(100vw - 32px);padding:28px;border:1px solid #d
 .pdf-previews{display:grid;gap:16px;margin-top:20px;min-width:0}
 .pdf-previews a{display:block;min-width:0}
 .pdf-previews img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:8px}
+
+.ai-task-queue{padding:12px 16px;border-top:1px solid #e0e7da;font-size:12px}.ai-task-queue>strong{display:block;margin-bottom:7px;color:#526b48}.ai-task-queue>div{display:flex;align-items:center;gap:12px;padding:5px 0}.ai-task-queue>div>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ai-task-queue button{flex-shrink:0}

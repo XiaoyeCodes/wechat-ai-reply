@@ -76,7 +76,7 @@ def test_photo_plus_caption_plus_correction_is_one_request(env):
     assert len([m for m in last if m['role']=='user'])==1
 
 
-def test_new_text_during_vision_cancels_reply_but_preserves_image_observation(env):
+def test_new_text_during_vision_queues_after_reply_and_preserves_image_observation(env):
     store,ai,_,cid,calls=env;rows=[];entered=threading.Event();release=threading.Event()
     original=ai.model_call
     def slow(p,m,t):
@@ -88,8 +88,11 @@ def test_new_text_during_vision_cancels_reply_but_preserves_image_observation(en
     try:
         assert entered.wait(5)
         add(env,rows,'text','这本书适合初学者吗？');second=ready(env)
-        assert ai.data.run(first['id'])['status']=='cancelled' and not store.pending()
+        assert ai.data.run(first['id'])['status']=='running' and not store.pending()
     finally:release.set();thread.join(5)
+    assert ai.data.run(first['id'])['status']=='queued'
+    ai.execute(second['id']);assert ai.data.run(second['id'])['status']=='pending'
+    sent(env,first['id'])
     ai.execute(second['id']);result=ai.data.run(second['id'])
     assert result['status']=='queued' and len(store.pending())==1
     assert len([m for m in calls if isinstance(m[-1]['content'],list)])==1
@@ -97,13 +100,16 @@ def test_new_text_during_vision_cancels_reply_but_preserves_image_observation(en
     assert any(t['step']=='图片理解缓存' for t in ai.data.detail(second['id'])['trace'])
 
 
-def test_three_texts_after_a_cancel_are_not_treated_as_old_background(env):
+def test_two_debounce_batches_remain_distinct_fifo_turns(env):
     store,ai,_,_,calls=env;rows=[]
     add(env,rows,'text','明天帮我安排三件事');first=ready(env)
     add(env,rows,'text','上午读书');add(env,rows,'text','下午散步，晚上看电影');last=ready(env)
-    ai.execute(last['id'])
-    assert ai.data.run(first['id'])['status']=='cancelled'
-    assert all(t in calls[-1][-1]['content'] for t in ('安排三件事','上午读书','下午散步'))
+    ai.execute(last['id']);assert ai.data.run(last['id'])['status']=='pending'
+    ai.execute(first['id']);sent(env,first['id']);ai.execute(last['id'])
+    assert ai.data.run(first['id'])['status']=='sent'
+    assert all(t in calls[-1][-1]['content'] for t in ('上午读书','下午散步'))
+    assert '安排三件事' not in calls[-1][-1]['content']
+    assert '安排三件事' in calls[-1][0]['content']
     assert len(store.pending())==1
 
 
@@ -199,14 +205,14 @@ def test_other_contact_cannot_receive_image_observation(env):
     assert not ai.data.run(r['id'])['state'].get('input_images')
 
 
-def test_pending_image_blocks_already_queued_reply_before_collection(env):
+def test_pending_image_does_not_cancel_reply_of_the_running_queue_turn(env):
     store,ai,_,_,_=env;rows=[]
     add(env,rows,'text','你好');r=ready(env);ai.execute(r['id'])
     queued=store.pending()[0]
     assert store.ai_send_valid(queued)
     add(env,rows,'image')  # Capture has not completed and _collect has not run.
-    assert not store.ai_send_valid(queued)
-    assert not ai.data.valid(ai.data.run(r['id']))
+    assert store.ai_send_valid(queued)
+    assert ai.data.valid(ai.data.run(r['id']))
 
 
 def test_forget_during_vision_does_not_restore_image_cache(env):
@@ -222,7 +228,7 @@ def test_forget_during_vision_does_not_restore_image_cache(env):
         assert not db.execute('SELECT 1 FROM companion_image_observations WHERE scope=?',(scope,)).fetchone()
 
 
-def test_dispatch_waits_for_obsolete_call_and_reuses_its_vision(env):
+def test_dispatch_waits_for_previous_delivery_and_reuses_its_vision(env):
     store,ai,_,cid,calls=env;rows=[]
     entered=threading.Event();release=threading.Event();original=ai.model_call
     def model(p,m,t):
@@ -240,9 +246,15 @@ def test_dispatch_waits_for_obsolete_call_and_reuses_its_vision(env):
             if len(runs)==2:break
             time.sleep(.05)
         assert len(runs)==2
-        assert sorted(r['status'] for r in runs)==['cancelled','pending']
+        assert sorted(r['status'] for r in runs)==['pending','running']
         assert not store.pending()
         release.set()
+        deadline=time.monotonic()+4
+        while time.monotonic()<deadline and not store.pending():time.sleep(.05)
+        assert len(store.pending())==1
+        first=next(r for r in ai.data.runs(cid) if r['status']=='queued')
+        assert any(r['status']=='pending' for r in ai.data.runs(cid))
+        sent(env,first['id'])
         deadline=time.monotonic()+4
         while time.monotonic()<deadline and not store.pending():time.sleep(.05)
         assert len(store.pending())==1

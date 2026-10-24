@@ -136,12 +136,29 @@ class Services:
         service=self.get(sid,'search')
         if service['driver']!='deepseek':return self.read_web(url)
         public_url(url)
-        data=self.deepseek_call(service,'fetch',{'url':url})
-        if not isinstance(data,dict) or not isinstance(data.get('content'),str) or not data['content'].strip():
-            raise RuntimeError('DeepSeek Fetch 未取得页面正文，不能用搜索摘要代替原文')
-        content=data['content']
-        return json.dumps({'engine':'deepseek_fetch','url':url,'title':str(data.get('title') or '')[:300],
-                           'content':content[:18000],'truncated':len(content)>18000},ensure_ascii=False)
+        from .web_reader import page_content,ReadUnavailable
+        try:
+            data=self.deepseek_call(service,'fetch',{'url':url})
+            if not isinstance(data,dict) or not isinstance(data.get('content'),str) or not data['content'].strip():
+                raise ReadUnavailable('DeepSeek Fetch 未取得页面正文，不能用搜索摘要代替原文')
+            content=page_content(data['content'],str(data.get('title') or ''))
+            return json.dumps({'engine':'deepseek_fetch','url':url,'title':str(data.get('title') or '')[:300],
+                               'content':content[:18000],'truncated':len(content)>18000},ensure_ascii=False)
+        except RuntimeError:
+            # Same public URL, using the existing Jina/direct reader. No search
+            # snippets, alternate article, paid provider or changed source.
+            try:
+                page=json.loads(self.read_web(url))
+                if not isinstance(page,dict) or page.get('coverage') in ('metadata_only','unavailable'):
+                    raise ReadUnavailable('公共网页读取未取得正文')
+                content=page_content(page.get('content'),str(page.get('title') or ''))
+                result={'engine':'public_page_fallback','fallback_from':'deepseek_fetch','url':url,
+                        'coverage':page.get('coverage','unknown'),'title':str(page.get('title') or '')[:300],
+                        'content':content[:24000],'truncated':bool(page.get('truncated')) or len(content)>24000}
+                if page.get('url') and page['url']!=url:result['resolved_url']=page['url']
+                return json.dumps(result,ensure_ascii=False)
+            except (RuntimeError,ValueError,TypeError):
+                raise ReadUnavailable('网页读取暂不可用，未取得可用正文') from None
 
     @staticmethod
     def weather(city):

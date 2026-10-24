@@ -58,6 +58,7 @@ class AIService:
         tool_ids=list(agent['tool_ids']);implicit=set()
         if agent.get('knowledge_ids') and agent.get('knowledge_mode','on_demand')=='on_demand':implicit.add('knowledge_search')
         if agent.get('skill_ids'):implicit.update(('use_skill','read_skill_file'))
+        if agent.get('skill_ids') or len(tool_ids)>12:implicit.add('search_capabilities')
         if any(self.data.get('skills',sid).get('name')=='jin10-financial-daily' for sid in agent.get('skill_ids',[])):
             implicit.add('financial_daily')
         for t in self.data.list('tools'):
@@ -70,7 +71,7 @@ class AIService:
                 'tools':{tid:self.data.get('tools',tid,private=True) for tid in tool_ids},
                 'skills':{sid:self.data.get('skills',sid) for sid in agent.get('skill_ids',[])}}
 
-    def create_run(self,agent_id,text,contact_id=None,trigger_id=None,dry_run=False,session_id=None,input_media_id=None,schedule=None,agent_schedule=None):
+    def create_run(self,agent_id,text,contact_id=None,trigger_id=None,dry_run=False,session_id=None,input_media_id=None,schedule=None,agent_schedule=None,queue_turn=False):
         if contact_id and not self.store.account_matches(self.store.contact(contact_id)):
             raise ValueError('此会话属于其他微信账号，请切换到对应账号')
         snapshot=self.snapshot(agent_id)
@@ -88,6 +89,7 @@ class AIService:
         state={'snapshot':snapshot,'index':0,'last':'','knowledge':[],'tool_rounds':0,'messages':[],
                'pending_calls':[],'call_index':0,'executing_tool':None,'context':[]}
         state.update(session_id=session_id or str(uuid.uuid4()),input_media_id=input_media_id)
+        if queue_turn:state['conversation_queue']=True
         if agent_schedule:
             from .agent_schedules import PRIVATE_TOOLS
             state['agent_schedule']=agent_schedule
@@ -143,7 +145,7 @@ class AIService:
                     for rid,future in list(self.futures.items()):
                         if future.done():self.futures.pop(rid,None)
                     with self.store.connect() as db:
-                        pending=[r['id'] for r in db.execute("SELECT id FROM ai_runs WHERE status='pending' ORDER BY created_at LIMIT 10")]
+                        pending=[r['id'] for r in db.execute("SELECT current.id FROM ai_runs current WHERE current.status='pending' AND (current.contact_id IS NULL OR EXISTS (SELECT 1 FROM contacts WHERE id=current.contact_id AND chat_type='group') OR NOT EXISTS (SELECT 1 FROM ai_runs older WHERE older.contact_id=current.contact_id AND older.rowid<current.rowid AND older.status IN ('pending','running','waiting_approval','draft','queued'))) ORDER BY current.created_at,current.rowid LIMIT 10")]
                     for rid in pending:
                         if rid not in self.futures and len(self.futures)<2:
                             pending_run=self.data.run(rid)
@@ -205,8 +207,7 @@ class AIService:
                 # or cancel a newer task whose trigger is already in progress.
                 if db.execute('SELECT 1 FROM ai_runs WHERE contact_id=? AND trigger_id=?',
                                                       (contact['id'],latest)).fetchone():continue
-            # New messages invalidate a response still being generated or queued.
-            self.data.cancel_contact(contact['id'],'收到新消息，旧回复已取消',discard_unseen=False)
+            # Keep the active turn. The debounce buffer becomes the next FIFO turn.
             with self.store.connect() as db:
                 db.execute('INSERT OR REPLACE INTO ai_inbox VALUES(?,?,?)',
                     (contact['id'],latest,time.time()+settings['debounce_seconds']))
@@ -226,7 +227,7 @@ class AIService:
             try:
                 if (contact['listening'] and contact['mode'] in ('ai_assist','ai_auto') and message
                         and message['direction']=='incoming' and not message['historical'] and not message.get('text_pending') and message['kind'] in ('text','image')):
-                    self.create_run(contact['ai_agent_id'],message['text'],contact['id'],message['id'])
+                    self.create_run(contact['ai_agent_id'],message['text'],contact['id'],message['id'],queue_turn=True)
             except (ValueError,KeyError) as exc:
                 with self.store.connect() as db:self.store.event(db,'ai.error',contact['id'],detail=str(exc))
             except sqlite3.IntegrityError:pass # Same incoming turn already has a run.
@@ -266,6 +267,9 @@ class AIService:
         from .dialogue_rhythm import instruction as pacing_instruction
         if not state.get('agent_schedule'):system+=pacing_instruction(run,state)
         system+=self.web.prompt(agent)
+        if web_allowed(state,run) and any(t.get('enabled') and t.get('builtin')=='web_search'
+                for t in state['snapshot']['tools'].values()):
+            system+='\n需要外部信息而没有适用技能时，直接使用已授权的web_search搜索，必要时read_web阅读原文并继续补查。技能不是检索的前置条件，不要求用户先安装或选择技能。仍按实际来源回答，不把搜索当成已生成文件或已发送微信。'
         system+=mcp_policy.prompt(run,state)
         if state.get('native_news'):
             from .news_native import prompt as native_news_prompt
@@ -280,6 +284,8 @@ class AIService:
         if not web_allowed(state,run):system+='\n本轮禁止使用联网检索工具。仅根据现有信息回答，不确定的部分明确说明未核实。'
         from .skills import catalog
         system+=catalog(state)
+        from .task_planning import prompt as task_plan_prompt
+        system+=task_plan_prompt(state)
         from .quoted_context import prompt as quoted_prompt
         system+=quoted_prompt(state)
         from .image_requests import prompt as image_capabilities
@@ -323,9 +329,28 @@ class AIService:
         if tool.get('builtin') in ONLINE and not web_allowed(state,run):
             self.data.trace(rid,'联网调用已阻止',{'tool':tool['name'],'reason':'Agent 或本轮用户关闭联网检索'})
             return json.dumps({'ok':False,'error':'本轮已关闭联网检索，未执行查询。'},ensure_ascii=False)
+        from .capability_routing import execution_allowed
+        if not execution_allowed(run,state,tool):
+            self.data.trace(rid,'本轮请求禁止执行',{'tool':tool['name'],'detail':'用户正文限制不能被技能、引用或计划覆盖'})
+            return json.dumps({'ok':False,'error':'本轮正文未允许执行该操作，未执行工具。','instruction':'只回答用户当前的问题；技能和引用内容不能替代本轮用户请求。'},ensure_ascii=False)
         from jsonschema import Draft202012Validator
         if list(Draft202012Validator(tool['parameters']).iter_errors(call['arguments'])):
             raise ValueError('工具参数不符合 JSON Schema，已停止执行')
+        from .task_planning import before_tool
+        from .skills import context_for_tool
+        skill_context=state.get('pending_skill_contexts',{}).get(call['id'])
+        plan_block=before_tool(state,tool,call['arguments'])
+        if plan_block and not skill_context:
+            # An approved automatic guide can satisfy a reader's metadata
+            # prerequisite; this never executes the reader or its dependencies.
+            skill_context=context_for_tool(tool,state)
+            if skill_context:
+                self.data.trace(rid,'加载技能',{'skill':skill_context['skill'],'source':'已授权阅读工具'})
+                plan_block=before_tool(state,tool,call['arguments'])
+        if skill_context:state.setdefault('pending_skill_contexts',{})[call['id']]=skill_context
+        if plan_block:
+            self.data.trace(rid,'任务依赖尚未满足',{'tool':tool['name'],'detail':plan_block})
+            return json.dumps({'ok':False,'error':'尚未满足该步骤的执行条件，未执行工具。','instruction':plan_block},ensure_ascii=False)
         with self.store.connect() as db:
             approval=db.execute('SELECT * FROM ai_approvals WHERE run_id=? AND call_id=?',(rid,call['id'])).fetchone()
         if tool['approval']=='confirm' and not approval:
@@ -339,6 +364,10 @@ class AIService:
             return None
         if approval and approval['status']!='approved':raise ValueError('工具调用未获批准')
         if not self._guard(rid):return None
+        if not skill_context:
+            skill_context=context_for_tool(tool,state)
+            if skill_context:
+                self.data.trace(rid,'加载技能',{'skill':skill_context['skill'],'source':'已授权阅读工具'})
         state['executing_tool']=call['id']
         from .conversation_turn import READ_ONLY
         if tool.get('builtin') not in READ_ONLY:state['effect_started']=True
@@ -353,6 +382,10 @@ class AIService:
             from .financial_daily import collect
             result=collect(call['arguments'],run,state,self.store.path.parent)
             self.data.trace(rid,'财经日报文件校验',state['financial_daily']['validation'])
+        elif tool.get('builtin')=='search_capabilities':
+            from .capability_routing import search
+            result=json.dumps(search(run,state,call['arguments']['query']),ensure_ascii=False)
+            self.data.trace(rid,'能力搜索',{'query':call['arguments']['query'],'result':result})
         elif tool.get('builtin') in ('use_skill','read_skill_file'):
             from .skills import run_tool
             result=run_tool(tool['builtin'],call['arguments'],state)
@@ -375,6 +408,14 @@ class AIService:
             receipt={**web_evidence(result),'tool':tool['name'],'call_id':call['id']}
             state.setdefault('web_evidence',[]).append(receipt)
             self.data.trace(rid,'联网结果核对',receipt)
+        from .task_planning import record_tool
+        record_tool(state,tool,call['arguments'],result,call['id'])
+        if skill_context:
+            try:content=json.loads(result)
+            except (ValueError,TypeError):content={'result':result}
+            if not isinstance(content,dict):content={'result':content}
+            result=json.dumps({**content,'bound_skill_context':skill_context},ensure_ascii=False)
+        state.get('pending_skill_contexts',{}).pop(call['id'],None)
         self.data.trace(rid,'工具结果',{'tool':tool['name'],'result':result})
         return result
 
@@ -383,6 +424,16 @@ class AIService:
             run=self._guard(rid)
             if not run or run['status']!='pending':return
             state=run['state'];agent=state['snapshot']['agent']
+            if state.get('conversation_queue'):
+                from .conversation_queue import is_head
+                if not is_head(self.store,run):return
+                if not state.get('queue_started'):
+                    from .conversation_context import contact_context
+                    profile=self.companion.memory.profile(state['scope'],run['agent_id'],run['contact_id'])
+                    contact=self.store.contact(run['contact_id'])
+                    state['context']=contact_context(self,contact,agent,run['trigger_id'],False,profile['forget_before'],state.get('turn_message_ids',[]),queue_turn=True)
+                    state['queue_started']=True
+                    self.data.update_run(rid,state=state)
             if state.get('group_sender'):
                 # Pictures can arrive during the same debounce window after @.
                 from .conversation_turn import prepare as prepare_turn
@@ -407,7 +458,7 @@ class AIService:
             from .financial_pdf import format_only_request
             if (not state.get('quoted_messages') and state.get('output_format') == 'pdf'
                     and (re.search(r'刚才|刚刚|上面|上一条|上一份', run['input']) or format_only_request(command))
-                    and not re.search(r'重新|再分析|再研究|补充|更新|结合|最新|今天', run['input'])):
+                    and not re.search(r'重新|再分析|再研究|补充|更新|结合|最新|今天|另外|同时|顺便|再查|以及', run['input'])):
                 with self.store.connect() as db:
                     prior = db.execute("SELECT id FROM ai_runs WHERE agent_id=? AND contact_id IS ? AND id!=? "
                         "AND created_at<? AND reply!='' AND status IN ('sent','completed','draft','uncertain') "
@@ -462,11 +513,25 @@ class AIService:
                 if key:reply=reply.replace(key,'[已隐藏密钥]')
                 self.finish(rid,reply)
                 return
+            from .capability_routing import prepare as prepare_capabilities
+            from .task_planning import prepare as prepare_task, bypass_shortcuts
+            if state.get('group_sender'):
+                group_contact=self.store.contact(run['contact_id'])
+                state['group_contact']={k:group_contact.get(k) for k in ('group_self_name','group_self_name_verified')}
+            prepare_capabilities(run,state)
+            if not state.get('capability_route_traced') and state['capability_route'].get('enabled'):
+                route=state['capability_route']
+                self.data.trace(rid,'技能筛选',{'bound_count':len(state['snapshot'].get('skills',{})),
+                    'candidates':[state['snapshot']['skills'][sid]['name'] for sid in route['candidate_skill_ids']],
+                    'intents':route['intents']})
+                state['capability_route_traced']=True
+            prepare_task(self,run,state)
+            self.data.update_run(rid,state=state)
             from .financial_daily import execute as execute_financial_daily
-            if execute_financial_daily(self,run,state):return
+            if not bypass_shortcuts(state) and execute_financial_daily(self,run,state):return
             from .image_requests import execute as execute_image_request
-            if execute_image_request(self,run,state):return
-            if not self.web.prepare(run,state):return
+            if not bypass_shortcuts(state) and execute_image_request(self,run,state):return
+            if not bypass_shortcuts(state) and not self.web.prepare(run,state):return
             started=time.monotonic()
             while state['index']<len(agent['steps']):
                 # Image generation has its own bounded timeout; allow the model
@@ -511,10 +576,18 @@ class AIService:
                     # Automatic fact extraction is the single writer for this
                     # mode; a second model-driven remember call creates the same
                     # fact under different keys before extraction commits.
-                    specs=[function_spec(t) for t in state['snapshot']['tools'].values() if t['enabled']
+                    eligible_tools=[t for t in state['snapshot']['tools'].values() if t['enabled']
                            and mcp_policy.eligible(t,run,state)
                            and (t.get('builtin') not in ONLINE or web_allowed(state,run))
                            and not (t.get('builtin')=='remember' and memory['enabled'] and memory['auto_extract'])]
+                    from .capability_routing import select_tools
+                    loaded_tools=select_tools(run,state,eligible_tools)
+                    specs=[function_spec(t) for t in loaded_tools]
+                    advertised=[t['id'] for t in loaded_tools]
+                    if state.get('advertised_tool_ids')!=advertised:
+                        self.data.trace(rid,'本轮工具加载',{'eligible_count':len(eligible_tools),'loaded_count':len(specs),
+                            'tools':[t['name'] for t in loaded_tools]})
+                    state['advertised_tool_ids']=advertised
                     reply_provider=dict(state['snapshot']['provider'])
                     if agent.get('temperature') is not None:reply_provider['temperature']=agent['temperature']
                     if state.get('native_news'):
@@ -527,21 +600,48 @@ class AIService:
                     self.data.trace(rid,'模型处理',{'model':state['snapshot']['provider']['model'],'usage':usage,'step':state['index']+1})
                     if answer.get('tool_calls'):
                         if state.get('news_ready'):raise ValueError('新闻核验后的汇总应仅使用已核验资料，不再调用工具')
-                        state['tool_rounds']+=1
-                        if state['tool_rounds']>agent['max_tool_rounds']:raise ValueError('达到 Agent 工具调用轮数限制')
                         if len(answer['tool_calls'])>8:raise ValueError('单轮工具调用过多')
                         state['messages'].append(answer)
-                        byname={t['name']:tid for tid,t in state['snapshot']['tools'].items()}
+                        byname={t['name']:t['id'] for t in loaded_tools}
                         calls=[]
                         for call in answer['tool_calls']:
                             function=call['function'];arguments=json.loads(function['arguments'])
-                            if not isinstance(arguments,dict) or function['name'] not in byname:raise ValueError('模型请求了未授权工具')
+                            if not isinstance(arguments,dict) or function['name'] not in byname:raise ValueError('模型请求了未授权或本轮尚未加载的工具')
                             calls.append({'id':call['id'],'tool_id':byname[function['name']],'arguments':arguments})
+                        metadata={'use_skill','read_skill_file','search_capabilities'}
+                        if all(state['snapshot']['tools'][c['tool_id']].get('builtin') in metadata for c in calls):
+                            state['metadata_rounds']=state.get('metadata_rounds',0)+1
+                            if state['metadata_rounds']>6:raise ValueError('达到本轮技能与工具发现轮数限制')
+                        else:
+                            state['tool_rounds']+=1
+                            if state['tool_rounds']>agent['max_tool_rounds']:raise ValueError('达到 Agent 工具调用轮数限制')
                         state['pending_calls']=calls;self.data.update_run(rid,state=state)
                         continue
                     reply=answer.get('content','') or ''
                     from .dialogue_rhythm import compact_short_reply
                     reply=compact_short_reply(run,state,reply)
+                    route=state.get('capability_route',{})
+                    if (route.get('enabled') and not route.get('candidate_skill_ids')
+                            and state.get('analysis',{}).get('needs_web') is True and web_allowed(state,run)
+                            and not state.get('tool_rounds') and not state.get('metadata_rounds')
+                            and not route.get('discovery_repair') and any(
+                                t.get('builtin')=='search_capabilities' for t in loaded_tools)):
+                        route['discovery_repair']=True
+                        direct_search=any(t.get('builtin')=='web_search' for t in loaded_tools)
+                        state['messages'].append({'role':'user','content':
+                            '没有预选技能不代表没有能力。本轮需要外部资料，但尚未尝试检索能力。'
+                            +('请直接调用本轮已授权的web_search搜索相关信息，必要时再read_web阅读原文；' if direct_search else
+                              '请调用search_capabilities，按用户任务改写关键词，从已授权能力中寻找合适工具；')+
+                            '找不到或确实缺少必要输入时如实失败或澄清，不猜测事实，不扩大权限。'})
+                        self.data.trace(rid,'能力发现补查',{'detail':'实时问题无匹配候选时，先进行一次有界能力搜索'})
+                        self.data.update_run(rid,state=state)
+                        continue
+                    reply,memory_repair=self.companion.memory_reply_check(run,state,reply)
+                    if memory_repair:
+                        state['messages'].append({'role':'user','content':memory_repair})
+                        self.data.trace(rid,'遗忘执行补查',{'detail':'尚未取得目标记忆的实际删除凭据'})
+                        self.data.update_run(rid,state=state)
+                        continue
                     reply,repair=mcp_policy.check(run,state,reply)
                     if repair:
                         state['messages'].append({'role':'user','content':'本轮专业工具尚未调用。请先调用已授权的专业工具；若缺少地点或主题等必要输入，请只询问缺少的信息。禁止声称查询/生成已完成。'})
@@ -551,6 +651,17 @@ class AIService:
                     if state.get('mcp_route'):
                         state['web_checked_reply']=reply
                     elif self.web.check(run,state,reply)=='lookup':continue
+                    from .task_planning import check as check_task
+                    reply,task_repair=check_task(run,state,state['web_checked_reply'])
+                    if task_repair:
+                        state['messages'].append({'role':'user','content':task_repair})
+                        self.data.trace(rid,'任务步骤补查',{'detail':'本轮仍有请求尚未取得实际执行凭据'})
+                        self.data.update_run(rid,state=state)
+                        continue
+                    if state.get('reply_failure_reason'):
+                        self.data.update_run(rid,state=state)
+                        self._fail_task(rid,state['reply_failure_reason'],reply);return
+                    state['web_checked_reply']=reply
                     state['last']=state['web_checked_reply'];state['messages']=[]
                 elif step['type']=='reply':
                     self.finish(rid,state['last']);return
@@ -659,6 +770,14 @@ class AIService:
             if not reply.strip():raise ValueError('Agent 生成了空回复')
             if len(reply)>16000:raise ValueError('Agent 回复超过大小限制')
             self.companion.remember_turn(run,state,reply)
+            if state.get('task_plan',{}).get('deferred_memory'):
+                live={m['id'] for m in self.companion.memory.list_memories(state['scope'])}
+                saved=any(receipt.get('run_id')==rid and receipt.get('scope')==state['scope']
+                    and receipt.get('memory_id') in live for receipt in state.get('automatic_memory_receipts',[]))
+                state['task_plan']['memory_status']='saved' if saved else 'failed'
+                self.data.update_run(rid,state=state)
+                if not saved:
+                    self._fail_task(rid,'复杂任务中的明确记住请求未取得实际保存凭据',reply);return
             if run['dry_run']:
                 self.data.update_run(rid,status='completed',reply=reply)
             else:
@@ -667,10 +786,7 @@ class AIService:
                     self.data.update_run(rid,status='draft',reply=reply,error='回复超过微信限制，请编辑后发送' if len(reply)>1999 and not native_vibe else '')
                 else:
                     self.data.update_run(rid,status='queued',reply=reply)
-                    if image_ids:self.store.enqueue_ai_images(run['contact_id'],rid,image_ids)
-                    elif pdf:self._enqueue_pdf(run)
-                    elif native_vibe:self.store.enqueue_ai_reply(run['contact_id'],reply,rid)
-                    else:self.store.enqueue(run['contact_id'],reply,'ai:'+rid,origin='ai',ai_run_id=rid)
+                    self._enqueue_result(run,reply,image_ids,pdf,native_vibe)
         self.companion.export_trace(self.data.run(rid),state)
 
     def approve(self,approval_id,approved):
@@ -710,10 +826,19 @@ class AIService:
                     from .financial_pdf import render_report, report_path
                     render_report(text, report_path(self.store.path.parent, rid), created_at=run['created_at'])
             self.data.update_run(rid,status='queued',reply=text)
-            if image_ids:return self.store.enqueue_ai_images(run['contact_id'],rid,image_ids)[0]
-            if pdf:return self._enqueue_pdf(run)
-            if native_vibe:return self.store.enqueue_ai_reply(run['contact_id'],text,rid)[0]
-            return self.store.enqueue(run['contact_id'],text,'ai:'+rid,origin='ai',ai_run_id=rid)[0]
+            return self._enqueue_result(run,text,image_ids,pdf,native_vibe)[0]
+
+    def _enqueue_result(self,run,text,image_ids,pdf,native_vibe=False):
+        state=run['state'];rid=run['id'];cid=run['contact_id']
+        if state.get('task_plan') and (image_ids or pdf):
+            from .financial_pdf import report_path
+            include_text=state['task_plan'].get('delivery_text',False)
+            return self.store.enqueue_ai_bundle(cid,rid,text if include_text else '',image_ids,
+                report_path(self.store.path.parent,rid).name if pdf else '')
+        if image_ids:return self.store.enqueue_ai_images(cid,rid,image_ids)
+        if pdf:return [self._enqueue_pdf(run)]
+        if native_vibe:return self.store.enqueue_ai_reply(cid,text,rid)
+        return [self.store.enqueue(cid,text,'ai:'+rid,origin='ai',ai_run_id=rid)[0]]
 
     def _enqueue_pdf(self, run):
         from .financial_pdf import report_path

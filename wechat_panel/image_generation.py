@@ -14,6 +14,27 @@ def install_defaults(data):
             data.save('skills',None,import_package([{'path':'SKILL.md','content':path.read_text(encoding='utf-8')}]))
 
 
+def sent_reference(ai,contact,message,state):
+    """An implicit generated reference needs confirmed delivery and ownership."""
+    if (message.get('direction')!='outgoing' or message.get('origin')!='ai'
+            or message.get('kind')!='image' or message.get('status')!='confirmed'
+            or message.get('historical') or not message.get('media_id') or not message.get('ai_run_id')
+            or message.get('contact_id')!=contact['id']
+            or message['id']<=max(contact.get('ai_context_start_message',0),state.get('forget_before',0))):
+        return None
+    try:previous=ai.data.run(message['ai_run_id'])
+    except KeyError:return None
+    if (previous['status']!='sent' or previous['agent_id']!=state['snapshot']['agent']['id']
+            or previous['contact_id']!=contact['id'] or previous['state'].get('scope')!=state['scope']
+            or previous['state'].get('group_sender')!=state.get('group_sender')):
+        return None
+    if not any(a.get('id')==message['media_id'] and a.get('kind')=='image'
+               for a in previous['state'].get('artifacts',[])):
+        return None
+    return {'message_id':message['id'],'media_id':message['media_id'],
+            'media_scope':state['scope'],'current':False,'generated':True}
+
+
 def reference_for(runtime,run,state,media,args):
     mode=args.get('mode')
     explicit=args.get('reference_media_id')
@@ -28,6 +49,13 @@ def reference_for(runtime,run,state,media,args):
     if explicit:
         chosen=memory.read_media(explicit)
         if chosen['scope'] not in permitted:raise ValueError('参考图不属于当前会话')
+        if run.get('contact_id') and chosen['scope']==scope:
+            with runtime.ai.store.connect() as db:
+                associated=[dict(row) for row in db.execute('SELECT * FROM messages WHERE contact_id=? AND media_id=?',
+                    (run['contact_id'],explicit))]
+            if associated and not any(sent_reference(runtime.ai,runtime.ai.store.contact(run['contact_id']),message,state)
+                                      for message in associated):
+                raise ValueError('生成图尚未核对发送或已越过当前会话绑定边界')
         if state.get('group_sender') and chosen['scope']!=scope:
             with runtime.ai.store.connect() as db:
                 source=db.execute('SELECT 1 FROM messages WHERE contact_id=? AND media_id=? AND sender=? AND sender_verified=1 AND historical=0 AND id>?',
@@ -52,7 +80,11 @@ def reference_for(runtime,run,state,media,args):
                 source=runtime.ai.store.message(ref['message_id'])
                 if not source or source['contact_id']!=run.get('contact_id'):
                     raise ValueError('参考图不属于当前联系人')
-                ref={**ref,'media_id':source.get('media_id'),'media_scope':'wechat:'+source['contact_id']}
+                if source['direction']=='outgoing':
+                    verified=sent_reference(runtime.ai,runtime.ai.store.contact(source['contact_id']),source,state)
+                    if not verified:raise ValueError('生成图尚未核对发送或不属于本轮会话')
+                    ref={**ref,**verified}
+                else:ref={**ref,'media_id':source.get('media_id'),'media_scope':'wechat:'+source['contact_id']}
             if not ref.get('media_id'):raise ValueError('用户图片尚未读取成功，请重新上传后再修改')
             if ref.get('media_scope') not in permitted:raise ValueError('参考图不属于当前会话')
             chosen=memory.read_media(ref['media_id'],ref['media_scope'])

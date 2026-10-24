@@ -462,7 +462,8 @@ def create_app(data_dir: Path | None = None, demo=False, runtime_factory=Runtime
     def ai_cancel(run_id: str):
         with app.state.ai.lock:
             run=app.state.ai.data.run(run_id)
-            if run['contact_id']:app.state.ai.data.cancel_contact(run['contact_id'],'已人工取消 AI 回复')
+            if run['state'].get('conversation_queue'):app.state.ai.data.cancel_run(run_id)
+            elif run['contact_id']:app.state.ai.data.cancel_contact(run['contact_id'],'已人工取消 AI 回复')
             else:app.state.ai.data.update_run(run_id,status='cancelled',error='已取消测试')
         return {'ok':True}
 
